@@ -61,12 +61,35 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      # Adapters (network, keychain, terminal) and main.rs are excluded; see
-      # "Coverage deviation" in the README.
-      - run: >-
-          cargo llvm-cov --workspace --all-features --locked
-          --ignore-filename-regex '(adapters/|main\.rs|testing\.rs)'
+      # Adapters (network, keychain, terminal), main.rs and the test-only
+      # modules are excluded; see "Coverage deviation" in the README.
+      - run: cargo llvm-cov --workspace --all-features --locked --no-report
+      - name: coverage gate
+        run: >-
+          cargo llvm-cov report
+          --ignore-filename-regex "$COVERAGE_IGNORE"
           --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
+      - name: list uncovered regions
+        if: failure()
+        run: |
+          cargo llvm-cov report --ignore-filename-regex "$COVERAGE_IGNORE" --json --output-path coverage.json
+          python3 - <<'PY'
+          import json
+          data = json.load(open("coverage.json"))["data"][0]
+          seen = set()
+          for function in data["functions"]:
+              for region in function["regions"]:
+                  line, col, end_line, end_col, count, file_id, _, kind = region
+                  if count == 0 and kind == 0:
+                      name = function["filenames"][file_id].split("/src/")[-1]
+                      if name.startswith(("adapters/", "tests/")) or name in ("main.rs", "testing.rs"):
+                          continue
+                      seen.add((name, line, col, end_line, end_col))
+          for item in sorted(seen):
+              print("%s:%d:%d-%d:%d" % item)
+          PY
+    env:
+      COVERAGE_IGNORE: '(adapters/|main\.rs|testing\.rs|src/tests/)'
 
   dependencies:
     name: licenses and advisories

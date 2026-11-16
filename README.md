@@ -219,7 +219,9 @@ translate to IMAP, SMTP, files, environment and keychain.
 
 The Nebensound Coding Guidelines require 100% coverage of own production code.
 This crate excludes `src/adapters/` (IMAP, SMTP, HTTPS/DNS/TLS probes,
-keychain, terminal, files) and `src/main.rs` from the gate.
+keychain, terminal, files) and `src/main.rs` from the gate. Unit tests live in
+`src/tests/` and the fakes in `src/testing.rs`; both are test code and are not
+counted as production coverage.
 
 - **Risk:** errors in the translation to IMAP/SMTP (command syntax, folder
   encoding, flag names) are not caught by unit tests.
