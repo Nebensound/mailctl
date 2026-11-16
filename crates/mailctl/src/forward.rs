@@ -66,7 +66,7 @@ pub fn build(request: &ForwardRequest<'_>) -> Result<Vec<u8>, Error> {
         .date()
         .map(mail_parser::DateTime::to_rfc3339)
         .unwrap_or_default();
-    let text = parsed.body_text(0).unwrap_or_default();
+    let text = crate::model::body_text(&parsed);
     let mut body = String::new();
     if let Some(note) = request.note {
         body.push_str(note);

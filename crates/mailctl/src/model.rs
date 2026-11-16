@@ -143,6 +143,17 @@ fn summarize(
     }
 }
 
+/// All text parts of the body, in order, separated by a blank line. Mail
+/// clients put inline images between text parts; the text after an image is
+/// a part of its own.
+#[must_use]
+pub fn body_text(message: &mail_parser::Message<'_>) -> String {
+    (0..message.text_body_count())
+        .filter_map(|i| message.body_text(i))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Builds a summary from fetched headers.
 #[must_use]
 pub fn summary_from_header(raw: &RawHeader) -> MailSummary {
@@ -156,11 +167,7 @@ pub fn detail_from_message(raw: &RawMessage, max_chars: usize) -> MailDetail {
     let parser = MessageParser::default();
     let parsed = parser.parse(&raw.body);
     let summary = summarize(raw.uid, &raw.flags, raw.size, parsed.as_ref());
-    let full_text = parsed
-        .as_ref()
-        .and_then(|m| m.body_text(0))
-        .map(std::borrow::Cow::into_owned)
-        .unwrap_or_default();
+    let full_text = parsed.as_ref().map(body_text).unwrap_or_default();
     let text_truncated = full_text.chars().count() > max_chars;
     let text = full_text.chars().take(max_chars).collect();
     let attachments = parsed

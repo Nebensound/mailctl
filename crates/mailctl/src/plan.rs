@@ -218,7 +218,7 @@ fn run_op(
                     expect: &expect,
                     to,
                     from: &account.address,
-                    sent_folder: &account.sent_folder,
+                    sent_folder: account.sent_copy_folder(),
                     new_message_id: &id,
                     note: note.as_deref(),
                     dry_run: plan.dry_run,

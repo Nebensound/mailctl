@@ -176,3 +176,29 @@ fn smtp_security_is_kept_or_derived_from_the_port() -> Result<(), Error> {
     assert!(Config::parse(&base.replace("smtp_port = 2465", "smtp_security = \"ssl\"")).is_err());
     Ok(())
 }
+
+#[test]
+fn keychain_commands_are_quoted_and_single_line() -> Result<(), Error> {
+    assert_eq!(
+        keychain_store_command("mailctl", "work", &Secret::new(r#"pa"ss\word"#.into()))?,
+        "add-generic-password -U -s \"mailctl\" -a \"work\" -w \"pa\\\"ss\\\\word\"\n"
+    );
+    for (service, account, password) in [
+        ("mail\nctl", "work", "pw"),
+        ("mailctl", "wo\rrk", "pw"),
+        (
+            "mailctl",
+            "work",
+            "one\nadd-generic-password -s x -a y -w z",
+        ),
+    ] {
+        assert!(
+            matches!(
+                keychain_store_command(service, account, &Secret::new(password.into())),
+                Err(Error::Secret { .. })
+            ),
+            "{service:?} {account:?}"
+        );
+    }
+    Ok(())
+}

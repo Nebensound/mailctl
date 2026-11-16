@@ -394,3 +394,31 @@ fn every_host_is_probed_once() -> Result<(), Error> {
     assert_eq!(unique.len(), net.probed.len(), "{:?}", net.probed);
     Ok(())
 }
+
+#[test]
+fn the_address_is_percent_encoded_for_autoconfig() -> Result<(), Error> {
+    assert_eq!(
+        query_value("joe+inbox@example.com"),
+        "joe%2Binbox@example.com"
+    );
+    assert_eq!(query_value("a&b#c%d ü"), "a%26b%23c%25d%20%C3%BC");
+    let mut net = FakeNet {
+        ok: ok(&[("mail.example.net", 993), ("mail.example.net", 587)]),
+        ..FakeNet::default()
+    };
+    net.pages.insert(
+        "https://autoconfig.example.com/mail/config-v1.1.xml?emailaddress=joe%2Binbox@example.com"
+            .into(),
+        AUTOCONFIG.into(),
+    );
+    let found = discover(&EmailAddress::parse("joe+inbox@example.com")?, &mut net)?;
+    assert!(found.source.contains("joe%2Binbox"), "{}", found.source);
+    Ok(())
+}
+
+#[test]
+fn knows_servers_that_file_sent_mail_themselves() {
+    assert!(server_files_sent_mail("smtp.gmail.com"));
+    assert!(server_files_sent_mail("SMTP.Office365.com."));
+    assert!(!server_files_sent_mail("smtp.mail.me.com"));
+}

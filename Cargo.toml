@@ -32,7 +32,7 @@ toml = "1.2.1"
 unsafe_code = "forbid"
 missing_docs = "deny"
 warnings = "deny"
-unexpected_cfgs = "deny"
+unexpected_cfgs = { level = "deny", check-cfg = ["cfg(coverage_nightly)"] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

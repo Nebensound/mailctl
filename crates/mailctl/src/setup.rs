@@ -32,6 +32,8 @@ pub struct NewAccount {
     pub smtp_user: Option<String>,
     /// Sent folder.
     pub sent_folder: MailboxName,
+    /// Whether mailctl stores copies of forwards itself.
+    pub save_sent_copy: bool,
     /// Password source.
     pub password: PasswordSource,
     /// Access level.
@@ -92,6 +94,9 @@ pub fn add_account(text: &str, account: &NewAccount) -> Result<String, Error> {
         table.insert("smtp_user", value(user.as_str()));
     }
     table.insert("sent_folder", value(account.sent_folder.as_str()));
+    if !account.save_sent_copy {
+        table.insert("save_sent_copy", value(false));
+    }
     let mut password = InlineTable::new();
     match &account.password {
         PasswordSource::Keychain(service) => password.insert("keychain", service.as_str().into()),

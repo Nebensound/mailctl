@@ -1,15 +1,14 @@
 //! [`MailStore`] over IMAP with implicit TLS.
 
-use std::borrow::Cow;
 use std::time::Duration;
 
-use ::imap::types::Flag;
 use imap_proto::NameAttribute;
 
 use crate::adapters::net::connect_any;
 use crate::config::{AccountConfig, Secret};
 use crate::error::Error;
-use crate::store::{FLAG_FORWARDED, FolderInfo, MailStore, RawHeader, RawMessage};
+use crate::imap_wire::{append_mailbox, flag_of, keywords_allowed, special_use, uid_set};
+use crate::store::{FolderInfo, MailStore, RawHeader, RawMessage};
 use crate::types::{MailboxName, MessageId, Uid};
 use crate::utf7;
 
@@ -25,41 +24,14 @@ pub struct ImapStore {
     keywords: bool,
 }
 
+// Coverage: only reached when a live IMAP server fails.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn store_err(e: impl std::fmt::Display) -> Error {
     Error::Store(e.to_string())
 }
 
-fn flag_of(name: &str) -> Flag<'static> {
-    match name {
-        "\\Seen" => Flag::Seen,
-        "\\Answered" => Flag::Answered,
-        "\\Flagged" => Flag::Flagged,
-        "\\Draft" => Flag::Draft,
-        other => Flag::Custom(Cow::Owned(other.to_owned())),
-    }
-}
-
-fn special_use(attribute: &NameAttribute<'_>) -> Option<String> {
-    let name = match attribute {
-        NameAttribute::Sent => "sent",
-        NameAttribute::Drafts => "drafts",
-        NameAttribute::Junk => "junk",
-        NameAttribute::Trash => "trash",
-        NameAttribute::Archive => "archive",
-        NameAttribute::All => "all",
-        NameAttribute::Flagged => "flagged",
-        _ => return None,
-    };
-    Some(name.to_owned())
-}
-
-fn uid_set(uids: &[Uid]) -> String {
-    uids.iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
+// Coverage: needs a live IMAP server; the decisions it uses are in `imap_wire`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl ImapStore {
     /// Connects and logs in.
     ///
@@ -89,12 +61,16 @@ impl ImapStore {
     }
 }
 
+// Coverage: needs a live IMAP server.
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl Drop for ImapStore {
     fn drop(&mut self) {
         let _ = self.session.logout();
     }
 }
 
+// Coverage: needs a live IMAP server; the decisions it uses are in `imap_wire`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl MailStore for ImapStore {
     fn folders(&mut self) -> Result<Vec<FolderInfo>, Error> {
         let names = self.session.list(Some(""), Some("*")).map_err(store_err)?;
@@ -121,10 +97,12 @@ impl MailStore for ImapStore {
             .session
             .select(utf7::encode(folder.as_str()))
             .map_err(store_err)?;
-        self.keywords = mailbox
+        let permanent: Vec<String> = mailbox
             .permanent_flags
             .iter()
-            .any(|f| matches!(f, Flag::MayCreate) || f.to_string() == FLAG_FORWARDED);
+            .map(ToString::to_string)
+            .collect();
+        self.keywords = keywords_allowed(&permanent);
         Ok(())
     }
 
@@ -235,7 +213,8 @@ impl MailStore for ImapStore {
         message: &[u8],
         flags: &[&str],
     ) -> Result<(), Error> {
-        let mailbox = utf7::encode(folder.as_str());
+        // The imap crate puts this between quotes without escaping it.
+        let mailbox = append_mailbox(folder);
         self.session
             .append(&mailbox, message)
             .flags(flags.iter().map(|f| flag_of(f)))

@@ -648,7 +648,7 @@ fn forward(
         expect: &expect,
         to: &to,
         from: &session.account.address,
-        sent_folder: &session.account.sent_folder,
+        sent_folder: session.account.sent_copy_folder(),
         new_message_id: &id,
         note,
         dry_run: target.dry_run,

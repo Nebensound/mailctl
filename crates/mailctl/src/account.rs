@@ -61,8 +61,7 @@ pub enum AccountCommand {
         /// Account name.
         #[arg(short, long)]
         account: String,
-        /// Also delete the password from the keychain, unless another account
-        /// uses the same keychain item.
+        /// Also delete the account's password from the keychain.
         #[arg(long)]
         delete_password: bool,
     },
@@ -473,33 +472,6 @@ fn obtain_password(
     }
 }
 
-/// An unverified password must not replace the keychain item that another,
-/// working account logs in with.
-fn refuse_shared_unverified(
-    text: &str,
-    password: &PasswordSource,
-    user: &str,
-) -> Result<(), Error> {
-    let PasswordSource::Keychain(service) = password else {
-        return Ok(());
-    };
-    let shared_with = Config::parse(text).ok().and_then(|config| {
-        config
-            .accounts
-            .into_iter()
-            .find(|other| other.password == *password && other.user == user)
-    });
-    match shared_with {
-        Some(other) => Err(Error::InvalidInput(format!(
-            "account {} uses the same keychain item ({service}/{user}); an unverified \
-             password would replace its working one. Add without --no-verify, or change \
-             it with `mailctl account set-password -a {}`",
-            other.name, other.name
-        ))),
-        None => Ok(()),
-    }
-}
-
 /// Logs in (unless `--no-verify`), detects the sent folder and checks SMTP.
 fn verify_new_account(
     backend: &dyn Backend,
@@ -573,12 +545,10 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
         smtp_security: Some(settings.smtp.security),
         smtp_user: args.smtp_user.clone(),
         sent_folder: placeholder_sent,
+        save_sent_copy: !discover::server_files_sent_mail(&settings.smtp.host),
         password: password.clone(),
         access: Access::Read,
     };
-    if args.no_verify {
-        refuse_shared_unverified(&text, &password, &probe.user)?;
-    }
     let (secret, sent_folder) = verify_new_account(backend, args, &password, &mut probe)?;
     let new_text = setup::add_account(
         &text,
@@ -593,6 +563,7 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
             smtp_security: settings.smtp.security,
             smtp_user: args.smtp_user.clone(),
             sent_folder: sent_folder.clone(),
+            save_sent_copy: probe.save_sent_copy,
             password: password.clone(),
             access: args.access,
         },
@@ -604,7 +575,7 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
         backend.write_file(&path, &new_text)?;
         if let (PasswordSource::Keychain(service), Some(secret)) = (&password, &secret) {
             backend
-                .keychain_store(service, &probe.user, secret)
+                .keychain_store(service, probe.keychain_account(), secret)
                 .map_err(|e| {
                     Error::Partial(format!(
                         "account {} was added, but storing its password failed ({e}); \
@@ -648,11 +619,10 @@ fn load(
     cli: &Cli,
     backend: &dyn Backend,
     name: &str,
-) -> Result<(PathBuf, String, Config, AccountConfig), Error> {
+) -> Result<(PathBuf, String, AccountConfig), Error> {
     let (path, text) = config_text(cli, backend)?;
-    let config = Config::parse(&text)?;
-    let account = config.account(name)?.clone();
-    Ok((path, text, config, account))
+    let account = Config::parse(&text)?.account(name)?.clone();
+    Ok((path, text, account))
 }
 
 fn test(
@@ -662,7 +632,7 @@ fn test(
     name: &str,
     smtp: bool,
 ) -> Result<u8, Error> {
-    let (_, _, _, account) = load(cli, backend, name)?;
+    let (_, _, account) = load(cli, backend, name)?;
     let secret = resolve_password(&account, backend.secrets())?;
     let folders = service::folders(&mut read_only(backend, &account, &secret)?)?;
     let sent_folder_exists = folders.iter().any(|f| f.name == account.sent_folder);
@@ -708,7 +678,7 @@ fn set_password(
     name: &str,
     from_stdin: bool,
 ) -> Result<u8, Error> {
-    let (_, _, _, account) = load(cli, backend, name)?;
+    let (_, _, account) = load(cli, backend, name)?;
     let PasswordSource::Keychain(service) = &account.password else {
         return Err(Error::InvalidInput(format!(
             "account {name} reads its password from the environment; change the variable instead"
@@ -716,7 +686,7 @@ fn set_password(
     };
     let secret = obtain_password(backend, &account.password, &account, from_stdin)?;
     service::folders(&mut read_only(backend, &account, &secret)?)?;
-    backend.keychain_store(service, &account.user, &secret)?;
+    backend.keychain_store(service, account.keychain_account(), &secret)?;
     emit(
         out,
         &PasswordReport {
@@ -740,23 +710,15 @@ fn remove(
     name: &str,
     delete_password: bool,
 ) -> Result<u8, Error> {
-    let (path, text, config, account) = load(cli, backend, name)?;
+    let (path, text, account) = load(cli, backend, name)?;
     let new_text = setup::remove_account(&text, name)?;
-    // Another account may log in with the same keychain item; keep it then.
-    let shared = config.accounts.iter().any(|other| {
-        other.name != account.name
-            && other.password == account.password
-            && other.user == account.user
-    });
     // Config first: a leftover keychain item is harmless, a configured account
     // whose item is gone is not.
     backend.write_file(&path, &new_text)?;
     let mut password_deleted = false;
-    if let (true, false, PasswordSource::Keychain(service)) =
-        (delete_password, shared, &account.password)
-    {
+    if let (true, PasswordSource::Keychain(service)) = (delete_password, &account.password) {
         backend
-            .keychain_delete(service, &account.user)
+            .keychain_delete(service, account.keychain_account())
             .map_err(|e| {
                 Error::Partial(format!(
                     "account {name} was removed, but deleting its keychain item failed ({e})"

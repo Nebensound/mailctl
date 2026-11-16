@@ -26,6 +26,8 @@ pub struct ActionReport {
     /// Nothing was changed because of `--dry-run`.
     pub dry_run: bool,
     /// The change was made and confirmed by reading it back from the server.
+    /// `false` after a live move of a mail without `Message-ID`: it left the
+    /// source folder, but cannot be identified in the target.
     pub confirmed: bool,
 }
 
@@ -73,7 +75,8 @@ pub fn list_each(
     chunk: usize,
     on_mail: &mut dyn FnMut(MailSummary) -> Result<(), Error>,
 ) -> Result<usize, Error> {
-    store.select(folder)?;
+    // EXAMINE: reading must not clear `\Recent` for other clients.
+    store.select_read_only(folder)?;
     let mut uids: Vec<Uid> = store
         .uids()?
         .into_iter()
@@ -140,7 +143,7 @@ pub fn show(
     expect: Option<&Expect>,
     max_chars: usize,
 ) -> Result<MailDetail, Error> {
-    store.select(folder)?;
+    store.select_read_only(folder)?;
     if let Some(expect) = expect {
         verify(store, uid, expect)?;
     }
@@ -246,14 +249,16 @@ pub fn move_mail(
         }
         store.move_to(uid, target)?;
         store.select(folder)?;
-        if store.uids()?.contains(&uid) {
+        if !store.headers(&[uid])?.is_empty() {
             return Err(Error::NotConfirmed(format!("UID {uid} still in {folder}")));
         }
+        // Without a Message-ID the mail cannot be found again in the target:
+        // it left the source, but that is not confirmed as filed.
         if let Some(id) = &mail.message_id {
             let flag = mark_read_first.then_some(FLAG_SEEN);
             confirm_in_folder(store, target, id, flag)?;
+            confirmed = true;
         }
-        confirmed = true;
     }
     Ok(ActionReport {
         op: "move",
@@ -304,9 +309,12 @@ fn record_forward(
     bytes: &[u8],
 ) -> Result<(), Error> {
     let flagged = flag_forwarded(store, job);
-    let copied = store
-        .append(job.sent_folder, bytes, &[FLAG_SEEN])
-        .and_then(|()| confirm_in_folder(store, job.sent_folder, job.new_message_id, None));
+    let copied = match job.sent_folder {
+        Some(sent) => store
+            .append(sent, bytes, &[FLAG_SEEN])
+            .and_then(|()| confirm_in_folder(store, sent, job.new_message_id, None)),
+        None => Ok(()),
+    };
     match (flagged, copied) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
@@ -339,8 +347,9 @@ pub struct ForwardJob<'a> {
     pub to: &'a EmailAddress,
     /// Sender address of the account.
     pub from: &'a EmailAddress,
-    /// Sent folder for the copy.
-    pub sent_folder: &'a MailboxName,
+    /// Sent folder for the copy; `None` where the server files sent mail
+    /// itself (Gmail, Microsoft 365), so a second copy is not stored.
+    pub sent_folder: Option<&'a MailboxName>,
     /// `Message-ID` for the new message.
     pub new_message_id: &'a MessageId,
     /// Optional note.
@@ -384,7 +393,9 @@ pub fn forward(
         original: &original.body,
     })?;
     // Before anything is sent, also in a dry run: the copy must have a place.
-    require_folder(store, job.sent_folder)?;
+    if let Some(sent) = job.sent_folder {
+        require_folder(store, sent)?;
+    }
     let mut confirmed = false;
     if !job.dry_run {
         sender.send(job.from, job.to, &bytes)?;

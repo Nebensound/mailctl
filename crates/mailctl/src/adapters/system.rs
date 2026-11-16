@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::adapters::{imap::ImapStore, net::SystemNet, smtp::SmtpSender};
 use crate::cli::Backend;
-use crate::config::{AccountConfig, Secret, SecretLookup};
+use crate::config::{AccountConfig, Secret, SecretLookup, keychain_store_command};
 use crate::discover::Net;
 use crate::error::Error;
 use crate::store::{MailSender, MailStore};
@@ -16,6 +16,8 @@ use crate::store::{MailSender, MailStore};
 #[derive(Debug, Default)]
 pub struct SystemBackend;
 
+// Coverage: runs the macOS `security` tool and reads the process environment.
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl SecretLookup for SystemBackend {
     fn env(&self, name: &str) -> Option<String> {
         std::env::var(name).ok()
@@ -40,11 +42,14 @@ impl SecretLookup for SystemBackend {
 
 impl Backend for SystemBackend {
     fn read_config(&self, path: Option<&PathBuf>) -> Result<String, Error> {
-        let path = self.config_path(path)?;
-        std::fs::read_to_string(&path)
-            .map_err(|e| Error::Config(format!("{}: {e}", path.display())))
+        self.config_path(path).and_then(|path| {
+            std::fs::read_to_string(&path)
+                .map_err(|e| Error::Config(format!("{}: {e}", path.display())))
+        })
     }
 
+    // Coverage: reads a file or standard input; the plan itself is tested in `plan`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_plan(&self, path: &Path) -> Result<String, Error> {
         if path.as_os_str() == "-" {
             let mut text = String::new();
@@ -61,6 +66,8 @@ impl Backend for SystemBackend {
         self
     }
 
+    // Coverage: opens a live IMAP connection.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn connect(
         &self,
         account: &AccountConfig,
@@ -69,6 +76,8 @@ impl Backend for SystemBackend {
         Ok(Box::new(ImapStore::connect(account, secret)?))
     }
 
+    // Coverage: opens a live SMTP connection.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sender(
         &self,
         account: &AccountConfig,
@@ -96,7 +105,7 @@ impl Backend for SystemBackend {
             Some(path) => Ok(path.clone()),
             None => std::env::var_os("HOME")
                 .map(|home| PathBuf::from(home).join(".config/mailctl/config.toml"))
-                .ok_or_else(|| Error::Config("HOME is not set; pass --config".into())),
+                .ok_or(Error::Config("HOME is not set; pass --config".into())),
         }
     }
 
@@ -121,13 +130,13 @@ impl Backend for SystemBackend {
         let dir = target
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
+            .unwrap_or(Path::new("."));
         std::fs::create_dir_all(dir).map_err(fail)?;
         // A unique name in the same directory, created exclusively and
         // readable only by the owner from the start.
         let name = target
             .file_name()
-            .map_or_else(|| "config".into(), |n| n.to_string_lossy().into_owned());
+            .map_or(String::from("config"), |n| n.to_string_lossy().into_owned());
         let temp = dir.join(format!(
             ".{name}.{}.{:016x}.tmp",
             std::process::id(),
@@ -141,8 +150,8 @@ impl Backend for SystemBackend {
             options.mode(0o600);
         }
         let written = options.open(&temp).and_then(|mut file| {
-            file.write_all(text.as_bytes())?;
-            file.sync_all()
+            file.write_all(text.as_bytes())
+                .and_then(|()| file.sync_all())
         });
         let result = written.and_then(|()| std::fs::rename(&temp, &target));
         if result.is_err() {
@@ -152,6 +161,8 @@ impl Backend for SystemBackend {
         result.map_err(fail)
     }
 
+    // Coverage: needs an interactive terminal.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn prompt_line(&self, question: &str, default: Option<&str>) -> Result<Option<String>, Error> {
         if !std::io::stdin().is_terminal() {
             return Ok(None);
@@ -170,6 +181,8 @@ impl Backend for SystemBackend {
         Ok(Some(line.trim_end_matches(['\r', '\n']).to_owned()))
     }
 
+    // Coverage: needs an interactive terminal.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn prompt_password(&self, prompt: &str) -> Result<Option<Secret>, Error> {
         if !std::io::stdin().is_terminal() {
             return Ok(None);
@@ -179,6 +192,8 @@ impl Backend for SystemBackend {
             .map_err(|e| Error::InvalidInput(e.to_string()))
     }
 
+    // Coverage: reads the process's standard input.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_stdin(&self) -> Result<String, Error> {
         let mut text = String::new();
         std::io::stdin()
@@ -187,25 +202,10 @@ impl Backend for SystemBackend {
         Ok(text)
     }
 
+    // Coverage: runs the macOS `security` tool; the command is `config::keychain_store_command`.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn keychain_store(&self, service: &str, account: &str, secret: &Secret) -> Result<(), Error> {
-        // `security -i` reads commands line by line: a control character in
-        // any value could end the command early or start another one.
-        if [service, account, secret.expose()]
-            .iter()
-            .any(|value| value.chars().any(char::is_control))
-        {
-            return Err(Error::Secret {
-                account: account.to_owned(),
-                reason: "control characters cannot be stored in the keychain".into(),
-            });
-        }
-        let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
-        let command = format!(
-            "add-generic-password -U -s {} -a {} -w {}\n",
-            quote(service),
-            quote(account),
-            quote(secret.expose())
-        );
+        let command = keychain_store_command(service, account, secret)?;
         let fail = |reason: String| Error::Secret {
             account: account.to_owned(),
             reason,
@@ -232,6 +232,8 @@ impl Backend for SystemBackend {
         }
     }
 
+    // Coverage: runs the macOS `security` tool.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn keychain_delete(&self, service: &str, account: &str) -> Result<(), Error> {
         let fail = |reason: String| Error::Secret {
             account: account.to_owned(),
@@ -250,10 +252,14 @@ impl Backend for SystemBackend {
         }
     }
 
+    // Coverage: returns the real network.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn net(&self) -> Box<dyn Net> {
         Box::new(SystemNet::default())
     }
 
+    // Coverage: needs a live SMTP server.
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn check_smtp(&self, account: &AccountConfig, secret: &Secret) -> Result<(), Error> {
         SmtpSender::new(account, secret)?.check()
     }

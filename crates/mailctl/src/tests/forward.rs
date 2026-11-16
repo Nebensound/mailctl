@@ -149,3 +149,25 @@ fn text_attachments_keep_their_characters() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[test]
+fn every_text_part_is_forwarded() -> Result<(), Error> {
+    // As Apple Mail sends it: text, inline image, more text.
+    let original = "Subject: photo\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nBefore the picture.\r\n--b\r\nContent-Type: image/jpeg\r\nContent-Disposition: inline; filename=p.jpg\r\nContent-Transfer-Encoding: base64\r\n\r\n/9j/\r\n--b\r\nContent-Type: text/plain\r\n\r\nAfter the picture.\r\n--b--\r\n";
+    let addr = EmailAddress::parse("a@b.de")?;
+    let id = MessageId::parse("x@y")?;
+    let bytes = build(&ForwardRequest {
+        from: &addr,
+        to: &addr,
+        message_id: &id,
+        note: None,
+        original: original.as_bytes(),
+    })?;
+    let parsed = MessageParser::default()
+        .parse(&bytes)
+        .ok_or_else(|| Error::InvalidInput("unparseable".into()))?;
+    let text = parsed.body_text(0).unwrap_or_default();
+    assert!(text.contains("Before the picture."), "{text}");
+    assert!(text.contains("After the picture."), "{text}");
+    Ok(())
+}

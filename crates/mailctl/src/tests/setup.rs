@@ -15,6 +15,7 @@ fn account(name: &str) -> Result<NewAccount, Error> {
         smtp_security: Security::StartTls,
         smtp_user: None,
         sent_folder: MailboxName::new("INBOX.Sent")?,
+        save_sent_copy: true,
         password: PasswordSource::Keychain("mailctl".to_owned()),
         access: Access::Organize,
     })

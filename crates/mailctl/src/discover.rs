@@ -11,6 +11,8 @@
 //! certificate is valid for the host name. Plain-text connections are never
 //! suggested.
 
+use std::fmt::Write as _;
+
 use serde::Serialize;
 
 use crate::error::Error;
@@ -157,6 +159,23 @@ const PRESETS: &[(&str, &[&str], &str, &str, u16)] = &[
     ),
 ];
 
+/// SMTP servers that file every message sent through them in the sent folder
+/// themselves: Gmail and Microsoft 365 / Outlook.com.
+const FILES_SENT_MAIL: &[&str] = &[
+    "smtp.gmail.com",
+    "smtp.googlemail.com",
+    "smtp.office365.com",
+    "smtp-mail.outlook.com",
+];
+
+/// Whether `smtp_host` stores sent mail in the sent folder by itself, so a
+/// client must not add its own copy.
+#[must_use]
+pub fn server_files_sent_mail(smtp_host: &str) -> bool {
+    let host = smtp_host.trim_end_matches('.').to_ascii_lowercase();
+    FILES_SENT_MAIL.contains(&host.as_str())
+}
+
 /// An SMTP endpoint whose security follows from the port.
 pub(crate) fn smtp_endpoint(host: &str, port: u16) -> Endpoint {
     Endpoint {
@@ -278,6 +297,21 @@ fn base_domain(host: &str) -> String {
         .copied()
         .collect::<Vec<_>>()
         .join(".")
+}
+
+/// Percent-encodes `value` for a URL query: everything but the unreserved
+/// characters of RFC 3986, so `+`, `&`, `#` and `%` arrive as they are.
+fn query_value(value: &str) -> String {
+    value
+        .bytes()
+        .fold(String::with_capacity(value.len()), |mut out, b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~' | b'@') {
+                out.push(char::from(b));
+            } else {
+                let _ = write!(out, "%{b:02X}");
+            }
+            out
+        })
 }
 
 /// Removes repeated host names, keeping the first occurrence of each.
@@ -422,7 +456,10 @@ pub fn discover(address: &EmailAddress, net: &mut dyn Net) -> Result<Discovery, 
         return Ok(found);
     }
     let provider_urls = [
-        format!("https://autoconfig.{domain}/mail/config-v1.1.xml?emailaddress={address}"),
+        format!(
+            "https://autoconfig.{domain}/mail/config-v1.1.xml?emailaddress={}",
+            query_value(address.as_str())
+        ),
         format!("https://{domain}/.well-known/autoconfig/mail/config-v1.1.xml"),
     ];
     for url in &provider_urls {

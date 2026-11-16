@@ -103,13 +103,17 @@ Host names and sent folders above are examples; check them with
 `smtp_security = "starttls"` or `"tls"`; `account add` stores what discovery
 found, and without the key port 465 means TLS and any other port STARTTLS.
 Folder names that are not valid IMAP modified UTF-7 are left out of listings.
+`save_sent_copy = false` stops mailctl from storing its own copy of forwards in
+the sent folder; `account add` sets it for Gmail and Microsoft 365, whose SMTP
+servers file sent mail themselves.
 
-Passwords come from the macOS keychain (`password = { keychain = "<service>" }`,
-account = `user`) or from an environment variable (`password = { env = "VAR" }`)
+Passwords come from the macOS keychain (`password = { keychain = "<service>" }`;
+the item's account is the mailctl account name, so two accounts with the same
+login on different servers never share a password) or from an environment variable (`password = { env = "VAR" }`)
 for cloud agents and CI. iCloud needs an app-specific password.
 
 ```sh
-security add-generic-password -s mailctl -a alice@icloud.com -w
+security add-generic-password -s mailctl -a icloud -w
 ```
 
 ## Setting up accounts
@@ -151,8 +155,8 @@ ports default to 993 and 587 and the login to the address.
 Other account commands: `account test -a NAME [--smtp]`,
 `account set-access -a NAME read|flag|organize|send`,
 `account set-password -a NAME [--password-stdin]` (checks the login before
-storing), `account remove -a NAME [--delete-password]` (keeps a keychain item
-that another account still uses), and `allowlist add|remove ADDRESS`.
+storing), `account remove -a NAME [--delete-password]`, and
+`allowlist add|remove ADDRESS`.
 
 ## Commands
 
@@ -207,7 +211,7 @@ stop the rest.
 
 CI (`.github/workflows/ci.yml`) is self-contained so that anyone can reproduce
 it: fmt, clippy with warnings denied, tests on Linux and macOS, `cargo
-llvm-cov` with a 100% gate (see the deviation below), `cargo deny` for
+llvm-cov` with a 100% gate (see Coverage below), `cargo deny` for
 licenses and advisories, and a release build with a smoke test outside the
 source tree.
 
@@ -215,7 +219,7 @@ source tree.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --locked --all-features
-cargo llvm-cov --workspace --ignore-filename-regex '(adapters/|main\.rs|testing\.rs|src/tests/)' \
+cargo +nightly llvm-cov --workspace --ignore-filename-regex '(testing\.rs|src/tests/)' \
   --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
 cargo build --release
 ```
@@ -225,31 +229,30 @@ against the `MailStore` and `MailSender` traits; tests run them against an
 in-memory mailbox (`testing.rs`). The adapters in `src/adapters/` only
 translate to IMAP, SMTP, files, environment and keychain.
 
-## Coverage deviation
+## Coverage
 
 This project requires 100% test coverage of its production code (regions,
-lines and functions). It excludes `src/adapters/` (IMAP, SMTP, HTTPS/DNS/TLS probes,
-keychain, terminal, files) and `src/main.rs` from the gate. Unit tests live in
-`src/tests/` and the fakes in `src/testing.rs`; both are test code and are not
-counted as production coverage.
+lines and functions), measured with `cargo llvm-cov` on nightly. Unit tests
+live in `src/tests/` and the fakes in `src/testing.rs`; both are test code and
+are not counted.
 
-- **Risk:** errors in the translation to IMAP/SMTP (command syntax, folder
-  encoding, flag names) are not caught by unit tests.
-- **Rationale:** they need a real mail server; they contain no decisions,
-  which all live in tested modules. Folder-name encoding (`utf7`) is
-  separately tested.
-- **Migration target:** integration tests against a disposable IMAP/SMTP
-  server (for example GreenMail or Dovecot in a container) in CI, then remove
-  the exclusion.
+All decisions live in tested modules, including those the adapters need:
+`imap_wire` (flags, UID sets, keyword support, APPEND quoting), `probe` (the
+SMTP dialog before STARTTLS, handshake classification),
+`config::keychain_store_command` and `Secret::from_keychain_output`. The file
+handling of the system backend is tested against a temporary directory.
 
-Measured locally with `cargo tarpaulin` (LLVM tools matching rustc were not
-available in the build environment): 99.7% of lines, the only reported gaps
-being four lines (struct-literal fields, a multi-line call and a method-chain
-line) that every test executes — a known
-line-attribution artefact of tarpaulin. CI must run `cargo llvm-cov` as
-listed above.
+What remains are thin I/O wrappers that need a live IMAP or SMTP server, the
+real network, a terminal or the macOS `security` tool. Each is marked
+`#[cfg_attr(coverage_nightly, coverage(off))]` directly, with a
+`// Coverage:` comment giving the reason, and `main` is exercised by the
+release smoke test.
 
-`src/testing.rs` is test-only code (`#[cfg(test)]`) and not production code.
+- **Risk:** mistakes in those wrappers (for example calling the wrong IMAP
+  command) are not caught by unit tests.
+- **Next step:** integration tests against a disposable IMAP/SMTP server (for
+  example GreenMail or Dovecot in a container) in CI, then remove the marks
+  from the IMAP and SMTP adapters.
 
 ## Status
 

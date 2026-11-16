@@ -86,7 +86,7 @@ fn add_with_discovery_verifies_and_stores() -> Result<(), Error> {
     assert_eq!(
         b.keychain
             .borrow()
-            .get(&("mailctl".to_owned(), "alice".to_owned()))
+            .get(&("mailctl".to_owned(), "work".to_owned()))
             .map(String::as_str),
         Some("geheim")
     );
@@ -545,10 +545,11 @@ fn remove_deletes_keychain_item_and_reports_missing_sent() -> Result<(), Error> 
             "INBOX",
         ],
     )?;
-    // `two` logs in with the same keychain item, so it stays.
+    // Same login, but each account has its own keychain item.
     let (v, _) = exec(&b, &["account", "remove", "-a", "one", "--delete-password"])?;
-    assert_eq!(at(&v, "/password_deleted"), false);
-    assert_eq!(b.keychain.borrow().len(), 1);
+    assert_eq!(at(&v, "/password_deleted"), true);
+    let keys: Vec<(String, String)> = b.keychain.borrow().keys().cloned().collect();
+    assert_eq!(keys, vec![("mailctl".to_owned(), "two".to_owned())]);
     b.env_password.replace(Some("x".into()));
     let text = b
         .file_text()
@@ -716,7 +717,7 @@ fn output_errors_are_reported() -> Result<(), Error> {
 }
 
 #[test]
-fn remove_deletes_an_unshared_keychain_item() -> Result<(), Error> {
+fn remove_deletes_only_the_accounts_own_keychain_item() -> Result<(), Error> {
     let b = configured()?;
     let (v, code) = exec(
         &b,
@@ -727,7 +728,7 @@ fn remove_deletes_an_unshared_keychain_item() -> Result<(), Error> {
         (0, &serde_json::Value::from(true))
     );
     let keys: Vec<(String, String)> = b.keychain.borrow().keys().cloned().collect();
-    assert_eq!(keys, vec![("mailctl".to_owned(), "alice".to_owned())]);
+    assert_eq!(keys, vec![("mailctl".to_owned(), "work".to_owned())]);
     Ok(())
 }
 
@@ -1055,43 +1056,37 @@ fn failures_while_confirming_foreign_servers_are_reported() -> Result<(), Error>
 }
 
 #[test]
-fn unverified_passwords_do_not_replace_a_shared_keychain_item() -> Result<(), Error> {
+fn accounts_with_the_same_login_keep_their_own_passwords() -> Result<(), Error> {
+    // `work` and `home` both log in as alice, on different servers.
     let b = configured()?;
-    let before = b.keychain.borrow().clone();
-    let file = b.file_text();
-    b.stdin.borrow_mut().clear();
-    b.stdin.borrow_mut().push_str("typo");
-    let add = |name: &'static str, user: &'static str| -> Vec<&'static str> {
-        vec![
+    b.passwords.borrow_mut().clear();
+    b.passwords.borrow_mut().push("home-password".into());
+    let (v, code) = exec(
+        &b,
+        &[
             "account",
             "add",
             "--name",
-            name,
+            "home",
             "--address",
             "alice@example.com",
             "--user",
-            user,
+            "alice",
             "--imap-host",
             "mail.example.net",
             "--smtp-host",
             "mail.example.net",
-            "--no-verify",
-            "--sent-folder",
-            "Sent",
-            "--password-stdin",
-        ]
-    };
-    let error = error_of(&b, &add("work2", "alice"))?;
-    assert!(
-        error.contains("account work uses the same keychain item"),
-        "{error}"
-    );
-    assert_eq!(*b.keychain.borrow(), before);
-    assert_eq!(b.file_text(), file);
-
-    // A login of its own is fine.
-    let (v, code) = exec(&b, &add("carol", "carol"))?;
+        ],
+    )?;
     assert_eq!(code, 0, "{v}");
+    let stored = |name: &str| {
+        b.keychain
+            .borrow()
+            .get(&("mailctl".to_owned(), name.to_owned()))
+            .cloned()
+    };
+    assert_eq!(stored("work").as_deref(), Some("pw"));
+    assert_eq!(stored("home").as_deref(), Some("home-password"));
     Ok(())
 }
 
@@ -1119,5 +1114,35 @@ fn discovered_smtp_security_is_stored() -> Result<(), Error> {
         (account.smtp_port, account.smtp_tls()),
         (2465, Security::Tls)
     );
+    Ok(())
+}
+
+#[test]
+fn gmail_accounts_do_not_store_their_own_sent_copy() -> Result<(), Error> {
+    let net = FakeNet {
+        ok: vec![
+            ("imap.gmail.com".into(), 993),
+            ("smtp.gmail.com".into(), 465),
+        ],
+        ..FakeNet::default()
+    };
+    let b = FakeBackend::new(net);
+    b.passwords.borrow_mut().push("pw".into());
+    let (v, code) = exec(
+        &b,
+        &[
+            "account",
+            "add",
+            "--name",
+            "g",
+            "--address",
+            "alice@gmail.com",
+        ],
+    )?;
+    assert_eq!(code, 0, "{v}");
+    let config = Config::parse(&b.file_text())?;
+    let account = config.account("g")?;
+    assert!(!account.save_sent_copy);
+    assert_eq!(account.sent_copy_folder(), None);
     Ok(())
 }

@@ -51,6 +51,11 @@ pub struct AccountConfig {
     pub smtp_user: Option<String>,
     /// Folder for sent mail; forwarded copies are stored there.
     pub sent_folder: MailboxName,
+    /// Store a copy of forwarded mail in `sent_folder`. `false` for servers
+    /// that file mail sent through their SMTP server themselves (Gmail,
+    /// Microsoft 365), which would otherwise end up with two copies.
+    #[serde(default = "default_true")]
+    pub save_sent_copy: bool,
     /// Where the password comes from.
     pub password: PasswordSource,
     /// What mailctl may do in this account; defaults to read-only.
@@ -119,6 +124,10 @@ fn default_imap_port() -> u16 {
     DEFAULT_IMAP_PORT
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_smtp_port() -> u16 {
     DEFAULT_SMTP_PORT
 }
@@ -128,6 +137,20 @@ impl AccountConfig {
     #[must_use]
     pub fn smtp_login(&self) -> &str {
         self.smtp_user.as_deref().unwrap_or(&self.user)
+    }
+
+    /// The keychain item's account attribute: the account's own name, so two
+    /// accounts with the same login on different servers never share (and
+    /// overwrite) a stored password.
+    #[must_use]
+    pub fn keychain_account(&self) -> &str {
+        &self.name
+    }
+
+    /// The folder to store forwarded copies in, if mailctl stores them itself.
+    #[must_use]
+    pub fn sent_copy_folder(&self) -> Option<&MailboxName> {
+        self.save_sent_copy.then_some(&self.sent_folder)
     }
 
     /// The SMTP security to use: as configured, else derived from the port.
@@ -194,6 +217,35 @@ impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
     }
+}
+
+/// The `security -i` command that stores `secret` as a generic password.
+///
+/// # Errors
+/// [`Error::Secret`] if any value contains a control character: `security -i`
+/// reads commands line by line, so one could end the command early or start
+/// another.
+pub fn keychain_store_command(
+    service: &str,
+    account: &str,
+    secret: &Secret,
+) -> Result<String, Error> {
+    if [service, account, secret.expose()]
+        .iter()
+        .any(|value| value.chars().any(char::is_control))
+    {
+        return Err(Error::Secret {
+            account: account.to_owned(),
+            reason: "control characters cannot be stored in the keychain".into(),
+        });
+    }
+    let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    Ok(format!(
+        "add-generic-password -U -s {} -a {} -w {}\n",
+        quote(service),
+        quote(account),
+        quote(secret.expose())
+    ))
 }
 
 fn decode_hex_password(value: &str) -> Option<String> {
@@ -300,7 +352,7 @@ pub fn resolve_password(
             .map(Secret::new)
             .ok_or_else(|| fail(format!("environment variable {var} is not set"))),
         PasswordSource::Keychain(service) => lookup
-            .keychain(service, &account.user)
+            .keychain(service, account.keychain_account())
             .map(Secret::new)
             .map_err(fail),
     }

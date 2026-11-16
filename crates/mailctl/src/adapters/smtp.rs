@@ -14,10 +14,14 @@ pub struct SmtpSender {
     transport: SmtpTransport,
 }
 
+// Coverage: only reached when a live SMTP server fails.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn send_err(e: impl std::fmt::Display) -> Error {
     Error::Send(e.to_string())
 }
 
+// Coverage: builds a lettre transport; the security mode is decided by `AccountConfig::smtp_tls`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl SmtpSender {
     /// Prepares the transport; the connection is opened on send.
     ///
@@ -41,6 +45,8 @@ impl SmtpSender {
     }
 }
 
+// Coverage: needs a live SMTP server.
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl SmtpSender {
     /// Connects and logs in without sending anything.
     ///
@@ -55,6 +61,8 @@ impl SmtpSender {
     }
 }
 
+// Coverage: needs a live SMTP server.
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl MailSender for SmtpSender {
     fn send(
         &mut self,

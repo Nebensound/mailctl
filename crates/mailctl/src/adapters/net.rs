@@ -1,6 +1,6 @@
 //! [`Net`] over the real network: HTTPS, DNS and TLS probes.
 
-use std::io::{BufRead as _, BufReader, Read, Write as _};
+use std::io::{BufReader, Read};
 use std::net::{TcpStream, ToSocketAddrs as _};
 use std::time::Duration;
 
@@ -8,6 +8,7 @@ use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::RData;
 
 use crate::discover::{Endpoint, Net, Probe, Security, SrvRecord};
+use crate::probe::{handshake_failure, starttls_dialog};
 
 /// Timeout for every network step.
 const TIMEOUT: Duration = Duration::from_secs(8);
@@ -35,6 +36,8 @@ pub struct SystemNet {
     dns: Option<(tokio::runtime::Runtime, TokioResolver)>,
 }
 
+// Coverage: builds the HTTP agent and DNS resolver for the real network.
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl Default for SystemNet {
     fn default() -> Self {
         let agent = ureq::Agent::config_builder()
@@ -58,44 +61,14 @@ impl Default for SystemNet {
     }
 }
 
-fn read_reply(reader: &mut BufReader<&TcpStream>) -> Option<String> {
-    let mut reply = String::new();
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).ok()? == 0 {
-            return None;
-        }
-        reply.push_str(&line);
-        if line.as_bytes().get(3) != Some(&b'-') {
-            return Some(reply);
-        }
-    }
-}
-
+// Coverage: socket wrapper; the dialog itself is `probe::starttls_dialog`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn starttls_upgrade(stream: &TcpStream) -> Result<(), String> {
-    let mut reader = BufReader::new(stream);
-    let banner = read_reply(&mut reader).ok_or("no SMTP banner")?;
-    if !banner.starts_with("220") {
-        return Err(format!("unexpected banner {}", banner.trim()));
-    }
-    (&*stream)
-        .write_all(b"EHLO mailctl\r\n")
-        .map_err(|e| e.to_string())?;
-    let ehlo = read_reply(&mut reader).ok_or("no EHLO reply")?;
-    if !ehlo.to_uppercase().contains("STARTTLS") {
-        return Err("server does not offer STARTTLS".into());
-    }
-    (&*stream)
-        .write_all(b"STARTTLS\r\n")
-        .map_err(|e| e.to_string())?;
-    let ready = read_reply(&mut reader).ok_or("no STARTTLS reply")?;
-    if ready.starts_with("220") {
-        Ok(())
-    } else {
-        Err(format!("STARTTLS refused: {}", ready.trim()))
-    }
+    starttls_dialog(&mut BufReader::new(stream), &mut &*stream)
 }
 
+// Coverage: needs the real network; the decisions are in `discover` and `probe`.
+#[cfg_attr(coverage_nightly, coverage(off))]
 impl Net for SystemNet {
     fn http_get(&mut self, url: &str) -> Option<String> {
         let mut response = self.agent.get(url).call().ok()?;
@@ -174,21 +147,14 @@ impl Net for SystemNet {
         };
         match connector.connect(&endpoint.host, stream) {
             Ok(_) => Probe::Ok,
-            Err(native_tls::HandshakeError::Failure(e)) => {
-                let text = e.to_string();
-                let lower = text.to_lowercase();
-                if lower.contains("certificate")
-                    || lower.contains("hostname")
-                    || lower.contains("not trusted")
-                {
-                    Probe::CertificateMismatch(text)
-                } else {
-                    Probe::Unreachable(text)
-                }
-            }
+            Err(native_tls::HandshakeError::Failure(e)) => handshake_failure(e.to_string()),
             Err(native_tls::HandshakeError::WouldBlock(_)) => {
                 Probe::Unreachable("TLS handshake timed out".into())
             }
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/net.rs"]
+mod tests;

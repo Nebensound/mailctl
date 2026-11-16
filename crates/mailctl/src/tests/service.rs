@@ -219,7 +219,8 @@ fn move_confirmation_failures() -> Result<(), Error> {
         ),
         Err(Error::NotConfirmed(_))
     ));
-    // Mails without Message-ID are confirmed by their absence from the source folder.
+    // Mails without Message-ID leave the source folder, but cannot be found
+    // again in the target: the move is done, not confirmed.
     let no_id = FakeStore::raw_mail(4, b"From: z@x.de\r\nSubject: no id\r\n\r\nx".to_vec(), &[]);
     let r = MailRef::from_fallback("", "z@x.de", "no id", 33);
     let mut store = FakeStore::with_inbox(vec![no_id.clone()]);
@@ -232,7 +233,8 @@ fn move_confirmation_failures() -> Result<(), Error> {
         false,
         false,
     )?;
-    assert!(ok.confirmed);
+    assert!(!ok.confirmed);
+    assert_eq!(store.uids_of("Work/GitHub").len(), 1);
     let mut stuck = FakeStore {
         stuck_moves: true,
         ..FakeStore::with_inbox(vec![no_id])
@@ -288,7 +290,7 @@ fn forward_paths() -> Result<(), Error> {
         expect: &exp,
         to: &to,
         from: &from,
-        sent_folder: &sent,
+        sent_folder: Some(&sent),
         new_message_id: &new_id,
         note: None,
         dry_run: true,
@@ -437,7 +439,7 @@ fn every_server_failure_aborts_the_operation() -> Result<(), Error> {
                 expect: &by_id,
                 to: &to,
                 from: &from,
-                sent_folder: &sent,
+                sent_folder: Some(&sent),
                 new_message_id: &new_id,
                 note: None,
                 dry_run: false,
@@ -478,7 +480,7 @@ fn forward_refuses_originals_it_cannot_rebuild() -> Result<(), Error> {
         expect: &by_id,
         to: &to,
         from: &from,
-        sent_folder: &sent,
+        sent_folder: Some(&sent),
         new_message_id: &new_id,
         note: None,
         dry_run: false,
@@ -507,7 +509,7 @@ fn failed_sent_copy_does_not_allow_a_second_forward() -> Result<(), Error> {
         expect: &by_id,
         to: &to,
         from: &from,
-        sent_folder: &sent,
+        sent_folder: Some(&sent),
         new_message_id: &new_id,
         note: None,
         dry_run: false,
@@ -600,7 +602,7 @@ fn forward_checks_before_sending() -> Result<(), Error> {
             expect: &by_id,
             to: &to,
             from: &from,
-            sent_folder: &missing,
+            sent_folder: Some(&missing),
             new_message_id: &new_id,
             note: None,
             dry_run,
@@ -616,7 +618,7 @@ fn forward_checks_before_sending() -> Result<(), Error> {
 
         // A server that forgets $Forwarded could not stop a second forward.
         let job = ForwardJob {
-            sent_folder: &sent,
+            sent_folder: Some(&sent),
             ..job
         };
         let mut forgetful = FakeStore {
@@ -643,7 +645,7 @@ fn the_sent_copy_does_not_depend_on_the_flag() -> Result<(), Error> {
         expect: &by_id,
         to: &to,
         from: &from,
-        sent_folder: &sent,
+        sent_folder: Some(&sent),
         new_message_id: &new_id,
         note: None,
         dry_run: false,
@@ -671,5 +673,41 @@ fn the_sent_copy_does_not_depend_on_the_flag() -> Result<(), Error> {
         matches!(&result, Err(Error::Partial(m)) if m.contains("$Forwarded not set") && m.contains("not found in Sent")),
         "{result:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn no_own_copy_where_the_server_files_sent_mail() -> Result<(), Error> {
+    let config = crate::testing::config()?;
+    let (inbox, _, from, to, new_id, by_id) = forward_job_parts()?;
+    let job = ForwardJob {
+        folder: &inbox,
+        uid: uid(2)?,
+        expect: &by_id,
+        to: &to,
+        from: &from,
+        sent_folder: None,
+        new_message_id: &new_id,
+        note: None,
+        dry_run: false,
+    };
+    let mut store = FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])]);
+    store.folders.remove("Sent");
+    let mut sender = FakeSender::default();
+    assert!(forward(&mut store, &mut sender, &config, &job)?.confirmed);
+    assert_eq!(sender.sent.len(), 1);
+    assert_eq!(store.flags("INBOX", 2), vec![FLAG_FORWARDED.to_owned()]);
+    Ok(())
+}
+
+#[test]
+fn reading_examines_instead_of_selecting() -> Result<(), Error> {
+    let mut store = FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])]);
+    let inbox = folder("INBOX")?;
+    list(&mut store, &inbox, 10, None)?;
+    assert!(store.read_only, "list must not open the folder read-write");
+    store.read_only = false;
+    show(&mut store, &inbox, uid(2)?, None, 10)?;
+    assert!(store.read_only, "show must not open the folder read-write");
     Ok(())
 }
