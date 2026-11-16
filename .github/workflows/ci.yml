@@ -1,6 +1,4 @@
-# Self-contained CI that mirrors the Nebensound Coding Guidelines for Rust.
-# It does not use Nebensound's private central workflows, so anyone can
-# reproduce every check of this public repository.
+# Self-contained CI: every check of this repository can be reproduced locally.
 name: CI
 
 on:

@@ -3,7 +3,7 @@
 use mail_parser::{Address, MessageParser, MimeHeaders};
 use serde::Serialize;
 
-use crate::store::{FLAG_FLAGGED, FLAG_FORWARDED, FLAG_SEEN, RawHeader, RawMessage};
+use crate::store::{FLAG_FLAGGED, FLAG_FORWARDED, FLAG_SEEN, RawHeader, RawMessage, has_flag};
 use crate::types::{MailRef, MessageId, Uid};
 
 /// One mail in a listing.
@@ -78,10 +78,6 @@ pub(crate) fn mime_of(content_type: Option<&mail_parser::ContentType<'_>>) -> St
     content_type
         .and_then(|ct| ct.subtype().map(|sub| format!("{}/{sub}", ct.ctype())))
         .unwrap_or_else(|| OCTET_STREAM.to_owned())
-}
-
-fn has_flag(flags: &[String], flag: &str) -> bool {
-    flags.iter().any(|f| f.eq_ignore_ascii_case(flag))
 }
 
 fn addresses(address: Option<&Address<'_>>) -> Vec<String> {
@@ -159,8 +155,7 @@ pub fn summary_from_header(raw: &RawHeader) -> MailSummary {
 pub fn detail_from_message(raw: &RawMessage, max_chars: usize) -> MailDetail {
     let parser = MessageParser::default();
     let parsed = parser.parse(&raw.body);
-    let size = u32::try_from(raw.body.len()).unwrap_or(u32::MAX);
-    let summary = summarize(raw.uid, &raw.flags, size, parsed.as_ref());
+    let summary = summarize(raw.uid, &raw.flags, raw.size, parsed.as_ref());
     let full_text = parsed
         .as_ref()
         .and_then(|m| m.body_text(0))

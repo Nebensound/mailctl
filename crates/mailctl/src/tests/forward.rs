@@ -113,3 +113,39 @@ fn rejects_addresses_the_transport_cannot_carry() -> Result<(), Error> {
     );
     Ok(())
 }
+
+#[test]
+fn text_attachments_keep_their_characters() -> Result<(), Error> {
+    let addr = EmailAddress::parse("a@b.de")?;
+    let id = MessageId::parse("x@y")?;
+    let mut original = b"Subject: csv\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nsee attachment\r\n--b\r\nContent-Type: text/csv; charset=iso-8859-1\r\nContent-Disposition: attachment; filename=list.csv\r\n\r\nname;city\r\nM".to_vec();
+    original.push(0xfc); // ü in ISO-8859-1
+    original.extend_from_slice(b"ller;K\r\n--b--\r\n");
+    let bytes = build(&ForwardRequest {
+        from: &addr,
+        to: &addr,
+        message_id: &id,
+        note: None,
+        original: &original,
+    })?;
+    let parsed = MessageParser::default()
+        .parse(&bytes)
+        .ok_or_else(|| Error::InvalidInput("unparseable".into()))?;
+    let csv = parsed
+        .attachments()
+        .next()
+        .ok_or_else(|| Error::InvalidInput("no attachment".into()))?;
+    assert_eq!(
+        csv.content_type()
+            .and_then(|ct| ct.attribute("charset"))
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("utf-8")
+    );
+    assert!(
+        csv.text_contents().is_some_and(|t| t.contains("Müller")),
+        "{:?}",
+        csv.text_contents()
+    );
+    Ok(())
+}

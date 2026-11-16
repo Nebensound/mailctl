@@ -4,7 +4,7 @@ use clap::Parser as _;
 
 use super::*;
 use crate::cli::run;
-use crate::discover::tests::{AUTOCONFIG, FakeNet};
+use crate::discover::tests::{AUTOCONFIG, FakeNet, srv_net};
 use crate::testing::FakeBackend;
 
 fn exec(b: &FakeBackend, args: &[&str]) -> Result<(serde_json::Value, u8), Error> {
@@ -654,8 +654,13 @@ fn fails_cleanly(args: &[&str], inject: &dyn Fn(&mut FakeBackend, usize)) -> Res
         if code == 0 {
             return Ok(n);
         }
-        assert!(at(&v, "/error").is_string(), "{args:?} at {n}: {v}");
-        assert_eq!(b.file_text(), before, "{args:?} at {n}");
+        let error = at(&v, "/error").as_str().unwrap_or_default();
+        assert!(!error.is_empty(), "{args:?} at {n}: {v}");
+        // Only a keychain step after the file was written may leave it changed,
+        // and it must say so.
+        if !error.starts_with("partly done") {
+            assert_eq!(b.file_text(), before, "{args:?} at {n}");
+        }
     }
     Err(Error::Store(format!("{args:?} never succeeded")))
 }
@@ -921,5 +926,106 @@ fn manual_fallback_asks_only_for_missing_values() -> Result<(), Error> {
         )
     );
     assert!(b.answers.borrow().is_empty());
+    Ok(())
+}
+
+const ADD_ATTACKER: &[&str] = &[
+    "account",
+    "add",
+    "--name",
+    "n",
+    "--address",
+    "alice@example.com",
+];
+
+#[test]
+fn foreign_servers_from_dns_need_confirmation() -> Result<(), Error> {
+    let net = || srv_net("imap.attacker.net", "smtp.attacker.net");
+
+    // No terminal: refused before any login, with the way out.
+    let headless = FakeBackend {
+        terminal: false,
+        ..FakeBackend::new(net())
+    };
+    let error = error_of(&headless, ADD_ATTACKER)?;
+    assert!(
+        error.contains("imap.attacker.net, smtp.attacker.net") && error.contains("--yes"),
+        "{error}"
+    );
+    assert_eq!(headless.smtp_checks.get(), 0);
+    assert!(headless.file_text().is_empty());
+
+    // Declined in the terminal.
+    let declined = FakeBackend::new(net());
+    declined.answers.borrow_mut().push("n".into());
+    let error = error_of(&declined, ADD_ATTACKER)?;
+    assert!(error.contains("not confirmed"), "{error}");
+    assert_eq!(declined.smtp_checks.get(), 0);
+
+    // Confirmed in the terminal, or with --yes.
+    let confirmed = FakeBackend::new(net());
+    confirmed.answers.borrow_mut().push("Yes".into());
+    confirmed.passwords.borrow_mut().push("pw".into());
+    let (v, code) = exec(&confirmed, ADD_ATTACKER)?;
+    assert_eq!(code, 0, "{v}");
+    let flagged = FakeBackend {
+        terminal: false,
+        ..FakeBackend::new(net())
+    };
+    flagged.stdin.borrow_mut().push_str("pw");
+    let (v, code) = exec(
+        &flagged,
+        &[ADD_ATTACKER, &["--yes", "--password-stdin"]].concat(),
+    )?;
+    assert_eq!(code, 0, "{v}");
+
+    // Servers given on the command line replace the foreign ones: no question.
+    let mut own_imap = srv_net("imap.attacker.net", "mail.example.com");
+    own_imap.ok.push(("mail.example.com".into(), 993));
+    let overridden = FakeBackend::new(own_imap);
+    overridden.passwords.borrow_mut().push("pw".into());
+    let (v, code) = exec(
+        &overridden,
+        &[ADD_ATTACKER, &["--imap-host", "mail.example.com"]].concat(),
+    )?;
+    assert_eq!(code, 0, "{v}");
+    assert!(overridden.answers.borrow().is_empty());
+    Ok(())
+}
+
+#[test]
+fn multi_line_passwords_are_refused() -> Result<(), Error> {
+    let b = FakeBackend::new(plesk_net());
+    b.stdin.borrow_mut().push_str("first\nsecond\n");
+    let error = error_of(
+        &b,
+        &[
+            "account",
+            "add",
+            "--name",
+            "n",
+            "--address",
+            "alice@example.com",
+            "--password-stdin",
+        ],
+    )?;
+    assert!(error.contains("control characters"), "{error}");
+    assert!(b.keychain.borrow().is_empty());
+    assert!(b.file_text().is_empty());
+
+    let typed = FakeBackend::new(plesk_net());
+    typed.passwords.borrow_mut().push("a\u{7}b".into());
+    let error = error_of(
+        &typed,
+        &[
+            "account",
+            "add",
+            "--name",
+            "n",
+            "--address",
+            "alice@example.com",
+        ],
+    )?;
+    assert!(error.contains("control characters"), "{error}");
     Ok(())
 }

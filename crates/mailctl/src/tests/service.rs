@@ -332,7 +332,7 @@ fn forward_paths() -> Result<(), Error> {
     };
     assert!(matches!(
         forward(&mut unflagged, &mut sender, &config, &live),
-        Err(Error::NotConfirmed(_))
+        Err(Error::Partial(m)) if m.contains("not confirmed")
     ));
     let mut no_copy = FakeStore {
         lose_appends: true,
@@ -340,7 +340,7 @@ fn forward_paths() -> Result<(), Error> {
     };
     assert!(matches!(
         forward(&mut no_copy, &mut sender, &config, &live),
-        Err(Error::NotConfirmed(_))
+        Err(Error::Partial(m)) if m.contains("not confirmed")
     ));
     let mut failing = FakeSender {
         fail: true,
@@ -384,6 +384,9 @@ fn fails_cleanly_at_every_call(
         match operation(&mut store) {
             Ok(()) => return Ok(call),
             Err(Error::Store(message)) if message == "simulated failure" => {}
+            // After a forward went out, failures are reported as partly done.
+            Err(Error::Partial(message)) if message.ends_with("mail server: simulated failure") => {
+            }
             Err(other) => return Err(other),
         }
     }
@@ -443,11 +446,11 @@ fn every_server_failure_aborts_the_operation() -> Result<(), Error> {
         })?,
     ];
     // list: select, uids, headers; show: select, headers, message; mark_read:
-    // select, headers, flag, headers; move by id: folders, capability, select,
-    // headers, flag, move, select, search, headers; move without id ends with
-    // select and uids; create: folders, create, folders; forward: select,
-    // headers, message, append, flag, headers, select, search.
-    assert_eq!(calls, [3, 3, 4, 9, 7, 3, 8]);
+    // select, headers, flag, headers; move: folders, capability, select,
+    // headers, (flag,) move, select, uids, and with a Message-ID select,
+    // search, headers; create: folders, create, folders; forward: select,
+    // headers, message, flag, headers, append, select, search, headers.
+    assert_eq!(calls, [3, 3, 4, 11, 7, 3, 9]);
     Ok(())
 }
 
@@ -485,5 +488,79 @@ fn forward_refuses_originals_it_cannot_rebuild() -> Result<(), Error> {
     ));
     assert!(sender.sent.is_empty());
     assert_eq!(store.snapshot(), before);
+    Ok(())
+}
+
+#[test]
+fn failed_sent_copy_does_not_allow_a_second_forward() -> Result<(), Error> {
+    let config = crate::testing::config()?;
+    let inbox = folder("INBOX")?;
+    let sent = folder("Sent")?;
+    let from = EmailAddress::parse("alice@example.com")?;
+    let to = EmailAddress::parse("accounting@example.com")?;
+    let new_id = MessageId::parse("fwd@mailctl")?;
+    let by_id = expect("m2@test")?;
+    let job = ForwardJob {
+        folder: &inbox,
+        uid: uid(2)?,
+        expect: &by_id,
+        to: &to,
+        from: &from,
+        sent_folder: &sent,
+        new_message_id: &new_id,
+        note: None,
+        dry_run: false,
+    };
+    // Calls: select, headers, message, flag, headers, append (fails).
+    let mut store = FakeStore {
+        fail_at_call: Some(5),
+        ..FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])])
+    };
+    let mut sender = FakeSender::default();
+    let first = forward(&mut store, &mut sender, &config, &job);
+    assert!(
+        matches!(&first, Err(Error::Partial(m)) if m.contains("was forwarded")),
+        "{first:?}"
+    );
+    assert_eq!(store.flags("INBOX", 2), vec![FLAG_FORWARDED.to_owned()]);
+    assert_eq!(
+        forward(&mut store, &mut sender, &config, &job),
+        Err(Error::AlreadyForwarded(2))
+    );
+    assert_eq!(sender.sent.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn confirmation_compares_the_message_id_exactly() -> Result<(), Error> {
+    // `1m2@test` contains `m2@test`: a header search finds it, but it is not
+    // the moved mail. The move is lost, so it must not be confirmed.
+    let lookalike = FakeStore::raw_mail(
+        50,
+        b"Message-ID: <1m2@test>\r\nSubject: other\r\n\r\nx".to_vec(),
+        &[],
+    );
+    let mut store = FakeStore {
+        lose_moves: true,
+        ..FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])])
+    };
+    store
+        .folders
+        .get_mut("Work/GitHub")
+        .ok_or(Error::NotFound(0))?
+        .push(lookalike);
+    let result = move_mail(
+        &mut store,
+        &folder("INBOX")?,
+        uid(2)?,
+        &expect("m2@test")?,
+        &folder("Work/GitHub")?,
+        false,
+        false,
+    );
+    assert!(
+        matches!(&result, Err(Error::NotConfirmed(m)) if m.contains("not found")),
+        "{result:?}"
+    );
     Ok(())
 }

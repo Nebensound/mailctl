@@ -263,6 +263,7 @@ impl MailStore for FakeStore {
             .map(|m| RawMessage {
                 uid,
                 flags: m.flags.clone(),
+                size: u32::try_from(m.body.len()).unwrap_or(u32::MAX),
                 body: m.body.clone(),
             }))
     }
@@ -523,6 +524,9 @@ impl Backend for FakeBackend {
     }
     fn unix_time(&self) -> u64 {
         1
+    }
+    fn random(&self) -> u64 {
+        0xfeed
     }
     fn config_path(&self, _explicit: Option<&PathBuf>) -> Result<PathBuf, Error> {
         self.step()?;

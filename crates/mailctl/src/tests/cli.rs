@@ -101,6 +101,9 @@ impl Backend for TestBackend {
     fn unix_time(&self) -> u64 {
         1_700_000_000
     }
+    fn random(&self) -> u64 {
+        u64::try_from(self.calls.get()).unwrap_or_default()
+    }
     fn config_path(&self, _explicit: Option<&PathBuf>) -> Result<PathBuf, Error> {
         Ok(PathBuf::from("/unused"))
     }
@@ -648,4 +651,21 @@ fn broken_configuration_is_reported() -> Result<(), Error> {
     }
     assert_eq!(b.store.borrow().calls.get(), 0);
     Ok(())
+}
+
+#[test]
+fn uid_paging_is_per_folder() {
+    let parsed = Cli::try_parse_from([
+        "mailctl",
+        "list",
+        "-a",
+        "test",
+        "--all-folders",
+        "--before",
+        "5",
+    ]);
+    assert!(
+        parsed.is_err_and(|e| e.to_string().contains("cannot be used with")),
+        "UIDs of one folder must not bound the others"
+    );
 }

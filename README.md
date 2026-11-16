@@ -133,6 +133,11 @@ used only if the TLS handshake succeeds and the certificate is valid for the
 host name. `mailctl account discover <address>` shows the result and a trace
 of everything that was tried.
 
+DNS answers are not authenticated. If SRV or MX records point to servers
+outside the address's domain, `account add` shows them and asks before sending
+the password there (RFC 6186 §6); without a terminal it needs `--yes`.
+`account discover` lists such servers under `unconfirmed_hosts`.
+
 If nothing usable is found, `account add` falls back to manual entry: in a
 terminal it asks for the missing values; without a terminal it fails with the
 options to pass (`--imap-host`, `--smtp-host`, `--imap-port`, `--smtp-port`,
@@ -166,7 +171,8 @@ that another account still uses), and `allowlist add|remove ADDRESS`.
 `list` fetches headers in chunks of 500 mails. With `--ndjson` it writes one
 JSON object per line (including `folder`) as soon as each chunk arrives, so a
 complete listing of a large mailbox can be piped into a file. `--all-folders`
-walks every selectable folder; `-n` then applies per folder.
+walks every selectable folder; `-n` then applies per folder. UIDs belong to
+one folder, so `--before` cannot be combined with `--all-folders`.
 
 ```sh
 mailctl list -a icloud --all-folders --ndjson -n 1000000 > icloud.ndjson
@@ -200,14 +206,13 @@ CI (`.github/workflows/ci.yml`) is self-contained so that anyone can reproduce
 it: fmt, clippy with warnings denied, tests on Linux and macOS, `cargo
 llvm-cov` with a 100% gate (see the deviation below), `cargo deny` for
 licenses and advisories, and a release build with a smoke test outside the
-source tree. It mirrors the Nebensound Coding Guidelines without depending on
-Nebensound's private central workflows.
+source tree.
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --locked --all-features
-cargo llvm-cov --workspace --ignore-filename-regex '(adapters/|main\.rs|testing\.rs)' \
+cargo llvm-cov --workspace --ignore-filename-regex '(adapters/|main\.rs|testing\.rs|src/tests/)' \
   --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
 cargo build --release
 ```
@@ -219,8 +224,8 @@ translate to IMAP, SMTP, files, environment and keychain.
 
 ## Coverage deviation
 
-The Nebensound Coding Guidelines require 100% coverage of own production code.
-This crate excludes `src/adapters/` (IMAP, SMTP, HTTPS/DNS/TLS probes,
+This project requires 100% test coverage of its production code (regions,
+lines and functions). It excludes `src/adapters/` (IMAP, SMTP, HTTPS/DNS/TLS probes,
 keychain, terminal, files) and `src/main.rs` from the gate. Unit tests live in
 `src/tests/` and the fakes in `src/testing.rs`; both are test code and are not
 counted as production coverage.

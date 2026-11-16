@@ -14,6 +14,12 @@ pub const FLAG_FLAGGED: &str = "\\Flagged";
 /// Keyword Apple Mail and others set on forwarded mail.
 pub const FLAG_FORWARDED: &str = "$Forwarded";
 
+/// Whether `flags` contains `flag`; IMAP flags compare case-insensitively.
+#[must_use]
+pub fn has_flag(flags: &[String], flag: &str) -> bool {
+    flags.iter().any(|f| f.eq_ignore_ascii_case(flag))
+}
+
 /// A folder as listed by the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderInfo {
@@ -48,6 +54,9 @@ pub struct RawMessage {
     pub uid: Uid,
     /// Flags, e.g. `\Seen`.
     pub flags: Vec<String>,
+    /// Size as reported by the server (`RFC822.SIZE`), the same value as in
+    /// [`RawHeader::size`], so both give the same [`crate::types::MailRef`].
+    pub size: u32,
     /// The full RFC 5322 message.
     pub body: Vec<u8>,
 }

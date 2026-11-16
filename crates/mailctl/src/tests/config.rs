@@ -129,3 +129,32 @@ fn resolves_passwords() -> Result<(), Error> {
     assert_eq!(format!("{:?}", Secret::new("pw".into())), "Secret(***)");
     Ok(())
 }
+
+#[test]
+fn entered_passwords_are_checked() -> Result<(), Error> {
+    assert_eq!(Secret::entered("geheim\r\n")?.expose(), "geheim");
+    assert_eq!(Secret::entered("über alles")?.expose(), "über alles");
+    for bad in ["", "\n", "first\nsecond", "tab\there"] {
+        assert!(
+            matches!(Secret::entered(bad), Err(Error::InvalidInput(_))),
+            "{bad:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn keychain_output_is_decoded_like_security_prints_it() {
+    let read = |raw: &str| Secret::from_keychain_output(raw).expose().to_owned();
+    // Printable ASCII comes back as it is, even when it looks like hex.
+    assert_eq!(read("geheim\n"), "geheim");
+    assert_eq!(read("deadbeef\n"), "deadbeef");
+    assert_eq!(read("6162"), "6162");
+    // Anything else is printed as hex: "grün" in UTF-8.
+    assert_eq!(read("6772c3bc6e\n"), "grün");
+    // Odd length, non-hex characters or invalid UTF-8 are not hex output.
+    assert_eq!(read("abc"), "abc");
+    assert_eq!(read("+f"), "+f");
+    assert_eq!(read("ff"), "ff");
+    assert_eq!(read(""), "");
+}

@@ -75,6 +75,7 @@ fn details_include_text_recipients_and_attachments() -> Result<(), Error> {
     let raw = RawMessage {
         uid: Uid::new(7)?,
         flags: vec![],
+        size: 4711,
         body: INVOICE.as_bytes().to_vec(),
     };
     let d = detail_from_message(&raw, 5);
@@ -114,6 +115,7 @@ Content-Disposition: attachment; filename=\"b.bin\"\r\n\r\ny\r\n--b--\r\n";
     let raw = RawMessage {
         uid: Uid::new(1)?,
         flags: vec![],
+        size: 300,
         body: body.to_vec(),
     };
     let d = detail_from_message(&raw, 10);
@@ -132,4 +134,30 @@ fn address_variants() {
     let msg = MessageParser::default().parse_headers(b"To: \"Only Name\" <>, plain@x.de\r\n\r\n");
     let list = addresses(msg.as_ref().and_then(mail_parser::Message::to));
     assert!(list.contains(&"plain@x.de".to_owned()));
+}
+
+#[test]
+fn show_and_list_agree_on_the_reference() -> Result<(), Error> {
+    // Without a Message-ID the reference hashes the size; the server's
+    // RFC822.SIZE may differ from the bytes received (line endings).
+    let mail = b"From: a@example.com\r\nSubject: no id\r\n\r\nbody\r\n".to_vec();
+    let size = 999;
+    let listed = summary_from_header(&RawHeader {
+        uid: Uid::new(3)?,
+        flags: vec![],
+        size,
+        header: mail.clone(),
+    });
+    let shown = detail_from_message(
+        &RawMessage {
+            uid: Uid::new(3)?,
+            flags: vec![],
+            size,
+            body: mail,
+        },
+        10,
+    );
+    assert_eq!(shown.summary.mail_ref, listed.mail_ref);
+    assert_eq!(shown.summary.size, 999);
+    Ok(())
 }

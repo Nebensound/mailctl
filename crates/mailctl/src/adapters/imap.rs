@@ -113,6 +113,9 @@ impl MailStore for ImapStore {
     }
 
     fn headers(&mut self, uids: &[Uid]) -> Result<Vec<RawHeader>, Error> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
         let fetches = self
             .session
             .uid_fetch(uid_set(uids), "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])")
@@ -134,16 +137,19 @@ impl MailStore for ImapStore {
     fn message(&mut self, uid: Uid) -> Result<Option<RawMessage>, Error> {
         let fetches = self
             .session
-            .uid_fetch(uid.to_string(), "(UID FLAGS BODY.PEEK[])")
+            .uid_fetch(uid.to_string(), "(UID FLAGS RFC822.SIZE BODY.PEEK[])")
             .map_err(store_err)?;
-        Ok(fetches
-            .iter()
-            .find(|f| f.uid == Some(uid.get()))
-            .map(|f| RawMessage {
+        Ok(fetches.iter().find(|f| f.uid == Some(uid.get())).map(|f| {
+            let body = f.body().unwrap_or_default().to_vec();
+            RawMessage {
                 uid,
                 flags: f.flags().iter().map(ToString::to_string).collect(),
-                body: f.body().unwrap_or_default().to_vec(),
-            }))
+                size: f
+                    .size
+                    .unwrap_or_else(|| u32::try_from(body.len()).unwrap_or(u32::MAX)),
+                body,
+            }
+        }))
     }
 
     fn add_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error> {

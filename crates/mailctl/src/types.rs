@@ -7,6 +7,20 @@ use sha2::{Digest, Sha256};
 
 use crate::error::Error;
 
+/// IMAP with implicit TLS.
+pub const IMAPS_PORT: u16 = 993;
+/// SMTP submission with STARTTLS.
+pub const SUBMISSION_PORT: u16 = 587;
+/// SMTP submission with implicit TLS.
+pub const SUBMISSIONS_PORT: u16 = 465;
+
+/// Whether SMTP on `port` speaks TLS from the first byte (465) instead of
+/// upgrading with STARTTLS.
+#[must_use]
+pub fn smtp_implicit_tls(port: u16) -> bool {
+    port == SUBMISSIONS_PORT
+}
+
 /// An IMAP UID within one mailbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -60,11 +74,15 @@ impl MessageId {
     }
 
     /// A new `Message-ID` for a message sent from `from`:
-    /// `mailctl-<time>-<counter>@<domain>`. Valid by construction, because an
-    /// [`EmailAddress`] contains no whitespace.
+    /// `mailctl-<time>-<random>-<counter>@<domain>`. `random` keeps two
+    /// forwards in the same second, or from two processes, apart. Valid by
+    /// construction, because an [`EmailAddress`] contains no whitespace.
     #[must_use]
-    pub fn generated(time: u64, counter: u32, from: &EmailAddress) -> Self {
-        Self(format!("mailctl-{time}-{counter}@{}", from.domain()))
+    pub fn generated(time: u64, random: u64, counter: u32, from: &EmailAddress) -> Self {
+        Self(format!(
+            "mailctl-{time}-{random:016x}-{counter}@{}",
+            from.domain()
+        ))
     }
 
     /// The value without angle brackets.

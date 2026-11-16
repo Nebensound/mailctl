@@ -12,6 +12,8 @@ pub(crate) struct FakeNet {
     pub(crate) mx: HashMap<String, Vec<String>>,
     pub(crate) ok: Vec<(String, u16)>,
     pub(crate) mismatch: Vec<(String, u16)>,
+    /// Every endpoint probed, in order.
+    pub(crate) probed: Vec<(String, u16)>,
 }
 
 impl Net for FakeNet {
@@ -26,6 +28,7 @@ impl Net for FakeNet {
     }
     fn probe(&mut self, e: &Endpoint) -> Probe {
         let key = (e.host.clone(), e.port);
+        self.probed.push(key.clone());
         if self.ok.contains(&key) {
             Probe::Ok
         } else if self.mismatch.contains(&key) {
@@ -310,5 +313,84 @@ fn unusable_ispdb_entry_for_mx_domain_falls_through() -> Result<(), Error> {
         matches!(&err, Err(Error::NoServerFound(m)) if m.contains("MX domain example.net: found, but not usable")),
         "{err:?}"
     );
+    Ok(())
+}
+
+pub(crate) fn srv_net(imap: &str, smtp: &str) -> FakeNet {
+    let mut net = FakeNet {
+        ok: ok(&[
+            (imap.trim_end_matches('.'), 993),
+            (smtp.trim_end_matches('.'), 465),
+        ]),
+        ..FakeNet::default()
+    };
+    for (name, target, port) in [
+        ("_imaps._tcp.example.com", imap, 993),
+        ("_submissions._tcp.example.com", smtp, 465),
+    ] {
+        net.srv.insert(
+            name.into(),
+            vec![SrvRecord {
+                target: target.into(),
+                port,
+                priority: 0,
+                weight: 0,
+            }],
+        );
+    }
+    net
+}
+
+#[test]
+fn dns_results_outside_the_domain_need_confirmation() -> Result<(), Error> {
+    assert!(within("Mail.Example.COM.", "example.com"));
+    assert!(!within("evilexample.com", "example.com"));
+    let own = discover(&ns()?, &mut srv_net("imap.example.com.", "example.com"))?;
+    assert!(
+        own.unconfirmed_hosts.is_empty(),
+        "{:?}",
+        own.unconfirmed_hosts
+    );
+    let foreign = discover(&ns()?, &mut srv_net("imap.attacker.net", "evilexample.com"))?;
+    assert_eq!(
+        foreign.unconfirmed_hosts,
+        vec!["imap.attacker.net".to_owned(), "evilexample.com".to_owned()]
+    );
+    let same = discover(&ns()?, &mut srv_net("mail.hoster.net", "mail.hoster.net"))?;
+    assert_eq!(same.unconfirmed_hosts, vec!["mail.hoster.net".to_owned()]);
+
+    // MX-derived results count as DNS too.
+    let mut mx = FakeNet {
+        ok: ok(&[("mail.example.net", 993), ("mail.example.net", 587)]),
+        ..FakeNet::default()
+    };
+    mx.mx
+        .insert("example.com".into(), vec!["mail.example.net".into()]);
+    assert_eq!(
+        discover(&ns()?, &mut mx)?.unconfirmed_hosts,
+        vec!["mail.example.net".to_owned()]
+    );
+    let mut ispdb = mx.clone();
+    ispdb.pages.insert(
+        "https://autoconfig.thunderbird.net/v1.1/example.net".into(),
+        AUTOCONFIG.into(),
+    );
+    assert_eq!(
+        discover(&ns()?, &mut ispdb)?.unconfirmed_hosts,
+        vec!["mail.example.net".to_owned()]
+    );
+    Ok(())
+}
+
+#[test]
+fn every_host_is_probed_once() -> Result<(), Error> {
+    let mut net = FakeNet::default();
+    net.mx
+        .insert("example.com".into(), vec!["mail.example.com".into()]);
+    assert!(discover(&ns()?, &mut net).is_err());
+    let mut unique = net.probed.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), net.probed.len(), "{:?}", net.probed);
     Ok(())
 }

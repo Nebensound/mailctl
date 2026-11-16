@@ -7,10 +7,7 @@ use serde::Deserialize;
 use crate::error::Error;
 use crate::types::{EmailAddress, MailboxName};
 
-/// Default IMAP port (implicit TLS).
-const DEFAULT_IMAP_PORT: u16 = 993;
-/// Default SMTP submission port (STARTTLS).
-const DEFAULT_SMTP_PORT: u16 = 587;
+use crate::types::{IMAPS_PORT as DEFAULT_IMAP_PORT, SUBMISSION_PORT as DEFAULT_SMTP_PORT};
 
 /// The whole configuration file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -149,11 +146,64 @@ impl Secret {
         Self(value)
     }
 
+    /// A password typed or piped in by the user, without the trailing line
+    /// break.
+    ///
+    /// # Errors
+    /// [`Error::InvalidInput`] for an empty password or one with control
+    /// characters such as an inner line break: those cannot be stored safely
+    /// in the keychain and are almost always a paste mistake.
+    pub fn entered(raw: &str) -> Result<Self, Error> {
+        let value = raw.trim_end_matches(['\r', '\n']);
+        if value.is_empty() {
+            return Err(Error::InvalidInput("empty password".into()));
+        }
+        if value.chars().any(char::is_control) {
+            return Err(Error::InvalidInput(
+                "password contains control characters such as a line break".into(),
+            ));
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    /// Reads the output of `security find-generic-password -w`. `security`
+    /// prints passwords that are not printable ASCII as hex digits, so a
+    /// hex string that decodes to UTF-8 with such characters is decoded; any
+    /// other value is taken as it is.
+    #[must_use]
+    pub fn from_keychain_output(raw: &str) -> Self {
+        let value = raw.trim_end_matches('\n');
+        Self(decode_hex_password(value).unwrap_or_else(|| value.to_owned()))
+    }
+
     /// Exposes the password for login.
     #[must_use]
     pub fn expose(&self) -> &str {
         &self.0
     }
+}
+
+fn decode_hex_password(value: &str) -> Option<String> {
+    let hex = !value.is_empty()
+        && value.len().is_multiple_of(2)
+        && value.bytes().all(|b| b.is_ascii_hexdigit());
+    if !hex {
+        return None;
+    }
+    let bytes: Vec<u8> = value
+        .as_bytes()
+        .chunks_exact(2)
+        .filter_map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        })
+        .collect();
+    let text = String::from_utf8(bytes).ok()?;
+    // `security` prints printable ASCII as it is; a hex form means it was not.
+    text.chars()
+        .any(|c| !(c == ' ' || c.is_ascii_graphic()))
+        .then_some(text)
 }
 
 impl fmt::Debug for Secret {

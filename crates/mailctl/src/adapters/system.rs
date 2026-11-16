@@ -32,20 +32,15 @@ impl SecretLookup for SystemBackend {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        let password =
+        let output =
             String::from_utf8(output.stdout).map_err(|_| "password is not UTF-8".to_owned())?;
-        Ok(password.trim_end_matches('\n').to_owned())
+        Ok(Secret::from_keychain_output(&output).expose().to_owned())
     }
 }
 
 impl Backend for SystemBackend {
     fn read_config(&self, path: Option<&PathBuf>) -> Result<String, Error> {
-        let path = match path {
-            Some(p) => p.clone(),
-            None => std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".config/mailctl/config.toml"))
-                .ok_or_else(|| Error::Config("HOME is not set; pass --config".into()))?,
-        };
+        let path = self.config_path(path)?;
         std::fs::read_to_string(&path)
             .map_err(|e| Error::Config(format!("{}: {e}", path.display())))
     }
@@ -88,6 +83,14 @@ impl Backend for SystemBackend {
             .map_or(0, |d| d.as_secs())
     }
 
+    fn random(&self) -> u64 {
+        use std::hash::{BuildHasher as _, Hasher as _};
+        // Every `RandomState` is seeded from the operating system's randomness.
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    }
+
     fn config_path(&self, explicit: Option<&PathBuf>) -> Result<PathBuf, Error> {
         match explicit {
             Some(path) => Ok(path.clone()),
@@ -107,18 +110,46 @@ impl Backend for SystemBackend {
 
     fn write_file(&self, path: &Path, text: &str) -> Result<(), Error> {
         let fail = |e: std::io::Error| Error::Config(format!("{}: {e}", path.display()));
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(fail)?;
-        }
-        let temp = path.with_extension("toml.tmp");
-        std::fs::write(&temp, text).map_err(fail)?;
+        // Write through a symlink (e.g. into a dotfiles repository) instead of
+        // replacing it with a regular file.
+        let target = match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                std::fs::canonicalize(path).map_err(fail)?
+            }
+            _ => path.to_path_buf(),
+        };
+        let dir = target
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(dir).map_err(fail)?;
+        // A unique name in the same directory, created exclusively and
+        // readable only by the owner from the start.
+        let name = target
+            .file_name()
+            .map_or_else(|| "config".into(), |n| n.to_string_lossy().into_owned());
+        let temp = dir.join(format!(
+            ".{name}.{}.{:016x}.tmp",
+            std::process::id(),
+            self.random()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
-                .map_err(fail)?;
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
         }
-        std::fs::rename(&temp, path).map_err(fail)
+        let written = options.open(&temp).and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        });
+        let result = written.and_then(|()| std::fs::rename(&temp, &target));
+        if result.is_err() {
+            // Best effort: do not leave the temporary file behind.
+            let _ = std::fs::remove_file(&temp);
+        }
+        result.map_err(fail)
     }
 
     fn prompt_line(&self, question: &str, default: Option<&str>) -> Result<Option<String>, Error> {
@@ -157,6 +188,17 @@ impl Backend for SystemBackend {
     }
 
     fn keychain_store(&self, service: &str, account: &str, secret: &Secret) -> Result<(), Error> {
+        // `security -i` reads commands line by line: a control character in
+        // any value could end the command early or start another one.
+        if [service, account, secret.expose()]
+            .iter()
+            .any(|value| value.chars().any(char::is_control))
+        {
+            return Err(Error::Secret {
+                account: account.to_owned(),
+                reason: "control characters cannot be stored in the keychain".into(),
+            });
+        }
         let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
         let command = format!(
             "add-generic-password -U -s {} -a {} -w {}\n",
@@ -216,3 +258,7 @@ impl Backend for SystemBackend {
         SmtpSender::new(account, secret)?.check()
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/system.rs"]
+mod tests;

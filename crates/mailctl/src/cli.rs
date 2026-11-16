@@ -76,8 +76,9 @@ pub enum Command {
         /// Maximum number of mails.
         #[arg(short = 'n', long, default_value_t = 50)]
         limit: usize,
-        /// Only mails with a UID below this one (paging).
-        #[arg(long)]
+        /// Only mails with a UID below this one (paging). UIDs are per folder,
+        /// so this cannot be combined with `--all-folders`.
+        #[arg(long, conflicts_with = "all_folders")]
         before: Option<u32>,
         /// One JSON object per line, written as soon as each chunk arrives.
         #[arg(long)]
@@ -200,6 +201,8 @@ pub trait Backend {
     ) -> Result<Box<dyn MailSender>, Error>;
     /// Seconds since the Unix epoch, used for new `Message-ID`s.
     fn unix_time(&self) -> u64;
+    /// A random number, different on every call, for unique `Message-ID`s.
+    fn random(&self) -> u64;
     /// Path of the configuration file.
     ///
     /// # Errors
@@ -376,7 +379,12 @@ impl<'a> Session<'a> {
     }
 
     fn new_message_id(&self, counter: u32) -> MessageId {
-        MessageId::generated(self.backend.unix_time(), counter, &self.account.address)
+        MessageId::generated(
+            self.backend.unix_time(),
+            self.backend.random(),
+            counter,
+            &self.account.address,
+        )
     }
 }
 

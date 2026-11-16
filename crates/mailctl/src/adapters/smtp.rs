@@ -9,9 +9,6 @@ use crate::error::Error;
 use crate::store::MailSender;
 use crate::types::EmailAddress;
 
-/// Port that uses TLS from the first byte instead of STARTTLS.
-const IMPLICIT_TLS_PORT: u16 = 465;
-
 /// An SMTP transport for one account.
 pub struct SmtpSender {
     transport: SmtpTransport,
@@ -27,7 +24,7 @@ impl SmtpSender {
     /// # Errors
     /// Invalid host configuration.
     pub fn new(account: &AccountConfig, secret: &Secret) -> Result<Self, Error> {
-        let builder = if account.smtp_port == IMPLICIT_TLS_PORT {
+        let builder = if crate::types::smtp_implicit_tls(account.smtp_port) {
             SmtpTransport::relay(&account.smtp_host)
         } else {
             SmtpTransport::starttls_relay(&account.smtp_host)

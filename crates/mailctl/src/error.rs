@@ -70,4 +70,8 @@ pub enum Error {
     /// A change was made but could not be confirmed afterwards.
     #[error("change not confirmed: {0}")]
     NotConfirmed(String),
+    /// The main step succeeded, a following one failed; repeating the command
+    /// is not the fix.
+    #[error("partly done: {0}")]
+    Partial(String),
 }

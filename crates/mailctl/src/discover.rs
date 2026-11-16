@@ -67,6 +67,10 @@ pub struct Discovery {
     pub source: String,
     /// What was tried, in order, for diagnostics.
     pub trace: Vec<String>,
+    /// Servers outside the address's domain that were found through
+    /// unauthenticated DNS (SRV or MX). A spoofed answer could point anywhere,
+    /// so the user has to confirm them before the first login (RFC 6186 §6).
+    pub unconfirmed_hosts: Vec<String>,
 }
 
 /// Outcome of a TLS probe.
@@ -105,12 +109,10 @@ pub trait Net {
     fn probe(&mut self, endpoint: &Endpoint) -> Probe;
 }
 
-/// IMAP port with implicit TLS.
-const IMAPS: u16 = 993;
-/// SMTP submission with implicit TLS.
-const SUBMISSIONS: u16 = 465;
-/// SMTP submission with STARTTLS.
-const SUBMISSION: u16 = 587;
+use crate::types::{
+    IMAPS_PORT as IMAPS, SUBMISSION_PORT as SUBMISSION, SUBMISSIONS_PORT as SUBMISSIONS,
+    smtp_implicit_tls,
+};
 
 /// Built-in settings for large providers: domains, IMAP host, SMTP host, SMTP port.
 const PRESETS: &[(&str, &[&str], &str, &str, u16)] = &[
@@ -165,10 +167,19 @@ const PRESETS: &[(&str, &[&str], &str, &str, u16)] = &[
 ];
 
 fn smtp_security(port: u16) -> Security {
-    if port == SUBMISSIONS {
+    if smtp_implicit_tls(port) {
         Security::Tls
     } else {
         Security::StartTls
+    }
+}
+
+/// An SMTP endpoint whose security follows from the port.
+pub(crate) fn smtp_endpoint(host: &str, port: u16) -> Endpoint {
+    Endpoint {
+        host: host.to_owned(),
+        port,
+        security: smtp_security(port),
     }
 }
 
@@ -286,6 +297,34 @@ fn base_domain(host: &str) -> String {
         .join(".")
 }
 
+/// Removes repeated host names, keeping the first occurrence of each.
+fn dedup(hosts: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    hosts.retain(|h| seen.insert(h.trim_end_matches('.').to_ascii_lowercase()));
+}
+
+/// Whether `host` is `domain` or a subdomain of it.
+fn within(host: &str, domain: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let domain = domain.to_ascii_lowercase();
+    host == domain
+        || host
+            .strip_suffix(&domain)
+            .is_some_and(|rest| rest.ends_with('.'))
+}
+
+/// Marks the servers of a DNS-derived result that lie outside `domain`.
+fn from_dns(mut found: Discovery, domain: &str) -> Discovery {
+    let mut outside: Vec<String> = [&found.settings.imap.host, &found.settings.smtp.host]
+        .into_iter()
+        .filter(|host| !within(host, domain))
+        .cloned()
+        .collect();
+    dedup(&mut outside);
+    found.unconfirmed_hosts = outside;
+    found
+}
+
 struct Run<'a> {
     net: &'a mut dyn Net,
     trace: Vec<String>,
@@ -320,6 +359,7 @@ impl Run<'_> {
                 settings,
                 source: source.to_owned(),
                 trace: std::mem::take(&mut self.trace),
+                unconfirmed_hosts: Vec::new(),
             })
         } else {
             self.trace.push(format!("{source}: found, but not usable"));
@@ -338,7 +378,7 @@ impl Run<'_> {
         let mut hosts: Vec<String> = mx.to_vec();
         hosts.push(format!("imap.{domain}"));
         hosts.push(format!("mail.{domain}"));
-        hosts.dedup();
+        dedup(&mut hosts);
         let imap = hosts
             .iter()
             .map(|h| Endpoint::new(h, IMAPS, Security::Tls))
@@ -350,7 +390,7 @@ impl Run<'_> {
         };
         let mut smtp_hosts = vec![imap.host.clone()];
         smtp_hosts.extend(hosts.iter().cloned());
-        smtp_hosts.dedup();
+        dedup(&mut smtp_hosts);
         let smtp = smtp_hosts
             .iter()
             .flat_map(|h| {
@@ -373,6 +413,7 @@ impl Run<'_> {
             },
             source: "guess from MX record and common host names".to_owned(),
             trace: std::mem::take(&mut self.trace),
+            unconfirmed_hosts: Vec::new(),
         })
     }
 }
@@ -414,7 +455,7 @@ pub fn discover(address: &EmailAddress, net: &mut dyn Net) -> Result<Discovery, 
     }
     let settings = srv_settings(run.net, address);
     if let Some(found) = run.verified("DNS SRV records", settings) {
-        return Ok(found);
+        return Ok(from_dns(found, &domain));
     }
     let mx = run.net.mx(&domain);
     if let Some(first) = mx.first() {
@@ -426,14 +467,14 @@ pub fn discover(address: &EmailAddress, net: &mut dyn Net) -> Result<Discovery, 
                 &format!("Mozilla ISPDB for MX domain {mx_domain}"),
                 settings,
             ) {
-                return Ok(found);
+                return Ok(from_dns(found, &domain));
             }
         }
     } else {
         run.trace.push(format!("{domain}: no MX record"));
     }
     if let Some(found) = run.guess(address, &mx) {
-        return Ok(found);
+        return Ok(from_dns(found, &domain));
     }
     Err(Error::NoServerFound(format!(
         "no mail server found for {address}; tried: {}",

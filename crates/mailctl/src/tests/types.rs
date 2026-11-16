@@ -80,8 +80,22 @@ fn expect_distinguishes_refs_and_ids() -> Result<(), Error> {
 #[test]
 fn generated_message_ids_use_the_sender_domain() -> Result<(), Error> {
     let from = EmailAddress::parse("Alice@Example.com")?;
-    let id = MessageId::generated(1_700_000_000, 3, &from);
-    assert_eq!(id.as_str(), "mailctl-1700000000-3@example.com");
+    let id = MessageId::generated(1_700_000_000, 0xbeef, 3, &from);
+    assert_eq!(
+        id.as_str(),
+        "mailctl-1700000000-000000000000beef-3@example.com"
+    );
+    assert_ne!(
+        MessageId::generated(1_700_000_000, 0xbeef, 3, &from),
+        MessageId::generated(1_700_000_000, 0xbeee, 3, &from)
+    );
     assert_eq!(MessageId::parse(id.as_str())?, id);
     Ok(())
+}
+
+#[test]
+fn only_port_465_uses_implicit_tls_for_smtp() {
+    assert!(smtp_implicit_tls(SUBMISSIONS_PORT));
+    assert!(!smtp_implicit_tls(SUBMISSION_PORT));
+    assert!(!smtp_implicit_tls(25));
 }

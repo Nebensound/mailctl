@@ -9,21 +9,15 @@ use serde::Serialize;
 
 use crate::cli::{Backend, Cli};
 use crate::config::{Access, AccountConfig, Config, PasswordSource, Secret, resolve_password};
-use crate::discover::{self, Discovery, Endpoint, Security, ServerSettings};
+use crate::discover::{self, Discovery, Endpoint, Security, ServerSettings, smtp_endpoint};
 use crate::error::Error;
 use crate::guard::GuardedStore;
 use crate::service;
 use crate::setup::{self, NewAccount};
-use crate::types::{EmailAddress, MailboxName};
+use crate::types::{EmailAddress, IMAPS_PORT as IMAPS, MailboxName, SUBMISSION_PORT as SUBMISSION};
 
 /// Default keychain service name.
 pub const DEFAULT_KEYCHAIN_SERVICE: &str = "mailctl";
-/// IMAP port with implicit TLS.
-const IMAPS: u16 = 993;
-/// SMTP submission with STARTTLS.
-const SUBMISSION: u16 = 587;
-/// SMTP submission with implicit TLS.
-const SUBMISSIONS: u16 = 465;
 
 /// Account commands.
 #[derive(Debug, Subcommand)]
@@ -76,6 +70,10 @@ pub enum AccountCommand {
 
 /// Options of `account add`. Every server option overrides discovery.
 #[derive(Debug, Clone, Args)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line switches"
+)]
 pub struct AddArgs {
     /// Short name, e.g. `icloud`.
     #[arg(long)]
@@ -116,6 +114,10 @@ pub struct AddArgs {
     /// Skip the login check (then `--sent-folder` is required).
     #[arg(long)]
     pub no_verify: bool,
+    /// Accept servers outside the address's domain that DNS pointed to,
+    /// without asking.
+    #[arg(long)]
+    pub yes: bool,
     /// Show what would be written, change nothing.
     #[arg(long)]
     pub dry_run: bool,
@@ -176,19 +178,6 @@ fn read_only(
         &account.name,
         Access::Read,
     ))
-}
-
-fn smtp_endpoint(host: &str, port: u16) -> Endpoint {
-    let security = if port == SUBMISSIONS {
-        Security::Tls
-    } else {
-        Security::StartTls
-    };
-    Endpoint {
-        host: host.to_owned(),
-        port,
-        security,
-    }
 }
 
 /// Runs an `account` command.
@@ -290,6 +279,8 @@ struct Resolved {
     settings: ServerSettings,
     source: String,
     trace: Vec<String>,
+    /// Servers from unauthenticated DNS outside the address's domain.
+    unconfirmed_hosts: Vec<String>,
 }
 
 fn apply_overrides(mut settings: ServerSettings, args: &AddArgs) -> ServerSettings {
@@ -387,7 +378,35 @@ fn manual(
         },
         source: "manual".to_owned(),
         trace: vec![reason.to_owned()],
+        unconfirmed_hosts: Vec::new(),
     })
+}
+
+/// Asks before the password is sent to servers outside the address's domain
+/// that only unauthenticated DNS pointed to.
+fn confirm_hosts(
+    backend: &dyn Backend,
+    hosts: &[String],
+    address: &EmailAddress,
+) -> Result<(), Error> {
+    if hosts.is_empty() {
+        return Ok(());
+    }
+    let list = hosts.join(", ");
+    let domain = address.domain();
+    let question =
+        format!("DNS points to {list}, outside {domain}. Send the password there? [y/N]");
+    let answer = backend.prompt_line(&question, None)?.ok_or_else(|| {
+        Error::InvalidInput(format!(
+            "DNS points to {list}, outside {domain}; confirm with --yes or set \
+             --imap-host and --smtp-host"
+        ))
+    })?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput(format!("servers {list} not confirmed")))
+    }
 }
 
 fn resolve_servers(
@@ -409,6 +428,7 @@ fn resolve_servers(
             },
             source: "command line".to_owned(),
             trace: Vec::new(),
+            unconfirmed_hosts: Vec::new(),
         });
     }
     match discover::discover(address, backend.net().as_mut()) {
@@ -416,11 +436,21 @@ fn resolve_servers(
             settings,
             source,
             trace,
-        }) => Ok(Resolved {
-            settings: apply_overrides(settings, args),
-            source,
-            trace,
-        }),
+            unconfirmed_hosts,
+        }) => {
+            let settings = apply_overrides(settings, args);
+            // Hosts the user gave on the command line need no confirmation.
+            let unconfirmed_hosts = unconfirmed_hosts
+                .into_iter()
+                .filter(|h| *h == settings.imap.host || *h == settings.smtp.host)
+                .collect();
+            Ok(Resolved {
+                settings,
+                source,
+                trace,
+                unconfirmed_hosts,
+            })
+        }
         Err(e) => manual(backend, args, address, &e.to_string()),
     }
 }
@@ -433,23 +463,17 @@ fn obtain_password(
 ) -> Result<Secret, Error> {
     match source {
         PasswordSource::Env(_) => resolve_password(probe, backend.secrets()),
-        PasswordSource::Keychain(_) if from_stdin => {
-            let text = backend.read_stdin()?;
-            let password = text.trim_end_matches(['\r', '\n']);
-            if password.is_empty() {
-                return Err(Error::InvalidInput(
-                    "empty password on standard input".into(),
-                ));
-            }
-            Ok(Secret::new(password.to_owned()))
+        PasswordSource::Keychain(_) if from_stdin => Secret::entered(&backend.read_stdin()?),
+        PasswordSource::Keychain(_) => {
+            let typed = backend
+                .prompt_password(&format!("Password for {}: ", probe.user))?
+                .ok_or_else(|| {
+                    Error::InvalidInput(
+                        "no terminal for the password prompt; use --password-stdin".into(),
+                    )
+                })?;
+            Secret::entered(typed.expose())
         }
-        PasswordSource::Keychain(_) => backend
-            .prompt_password(&format!("Password for {}: ", probe.user))?
-            .ok_or_else(|| {
-                Error::InvalidInput(
-                    "no terminal for the password prompt; use --password-stdin".into(),
-                )
-            }),
     }
 }
 
@@ -509,7 +533,11 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
         settings,
         source,
         trace,
+        unconfirmed_hosts,
     } = resolve_servers(backend, args, &address)?;
+    if !args.yes {
+        confirm_hosts(backend, &unconfirmed_hosts, &address)?;
+    }
     let placeholder_sent = MailboxName::inbox();
     let mut probe = AccountConfig {
         name: args.name.clone(),
@@ -543,11 +571,21 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
     )?;
     let mut password_stored = false;
     if !args.dry_run {
+        // Config first: storing the password with `-U` would overwrite an item
+        // another account shares, and that must not happen for a failed add.
+        backend.write_file(&path, &new_text)?;
         if let (PasswordSource::Keychain(service), Some(secret)) = (&password, &secret) {
-            backend.keychain_store(service, &probe.user, secret)?;
+            backend
+                .keychain_store(service, &probe.user, secret)
+                .map_err(|e| {
+                    Error::Partial(format!(
+                        "account {} was added, but storing its password failed ({e}); \
+                         run `mailctl account set-password -a {}`",
+                        args.name, args.name
+                    ))
+                })?;
             password_stored = true;
         }
-        backend.write_file(&path, &new_text)?;
     }
     emit(
         out,
@@ -682,15 +720,22 @@ fn remove(
             && other.password == account.password
             && other.user == account.user
     });
+    // Config first: a leftover keychain item is harmless, a configured account
+    // whose item is gone is not.
+    backend.write_file(&path, &new_text)?;
     let mut password_deleted = false;
     if let (true, false, PasswordSource::Keychain(service)) =
         (delete_password, shared, &account.password)
     {
-        // Before the file is written: if this fails, nothing has changed.
-        backend.keychain_delete(service, &account.user)?;
+        backend
+            .keychain_delete(service, &account.user)
+            .map_err(|e| {
+                Error::Partial(format!(
+                    "account {name} was removed, but deleting its keychain item failed ({e})"
+                ))
+            })?;
         password_deleted = true;
     }
-    backend.write_file(&path, &new_text)?;
     emit(
         out,
         &RemoveReport {

@@ -85,8 +85,16 @@ Subject: {subject}
     let mut parts = MultiPart::mixed().singlepart(SinglePart::plain(body));
     for part in parsed.attachments() {
         let name = part.attachment_name().unwrap_or("attachment").to_owned();
-        let content_type = ContentType::parse(&mime_of(part.content_type()))
-            .map_err(invalid("attachment type".to_owned()))?;
+        // mail_parser has decoded text parts to UTF-8 already; say so, or the
+        // recipient reads them in the default US-ASCII.
+        let mime = mime_of(part.content_type());
+        let mime = if part.is_text() {
+            format!("{mime}; charset=utf-8")
+        } else {
+            mime
+        };
+        let content_type =
+            ContentType::parse(&mime).map_err(invalid("attachment type".to_owned()))?;
         parts =
             parts.singlepart(Attachment::new(name).body(part.contents().to_vec(), content_type));
     }

@@ -7,7 +7,9 @@ use crate::config::Config;
 use crate::error::Error;
 use crate::forward::{self, ForwardRequest};
 use crate::model::{self, MailDetail, MailSummary};
-use crate::store::{FLAG_FORWARDED, FLAG_SEEN, FolderInfo, MailSender, MailStore, RawHeader};
+use crate::store::{
+    FLAG_FORWARDED, FLAG_SEEN, FolderInfo, MailSender, MailStore, RawHeader, has_flag,
+};
 use crate::types::{EmailAddress, Expect, MailboxName, MessageId, Uid};
 
 /// Result of a changing command.
@@ -127,10 +129,6 @@ fn verify(store: &mut dyn MailStore, uid: Uid, expect: &Expect) -> Result<MailSu
     }
 }
 
-fn has_flag(header: &RawHeader, flag: &str) -> bool {
-    header.flags.iter().any(|f| f.eq_ignore_ascii_case(flag))
-}
-
 /// Shows one mail, optionally checking its identity first.
 ///
 /// # Errors
@@ -166,7 +164,7 @@ pub fn mark_read(
     let mut confirmed = false;
     if !dry_run {
         store.add_flags(uid, &[FLAG_SEEN])?;
-        if !has_flag(&header_of(store, uid)?, FLAG_SEEN) {
+        if !has_flag(&header_of(store, uid)?.flags, FLAG_SEEN) {
             return Err(Error::NotConfirmed(format!("\\Seen not set on UID {uid}")));
         }
         confirmed = true;
@@ -192,6 +190,9 @@ fn require_folder(store: &mut dyn MailStore, name: &MailboxName) -> Result<(), E
     }
 }
 
+/// Checks that `folder` holds a mail whose `Message-ID` is exactly `id` (the
+/// server's header search only matches substrings), with `required_flag` set
+/// on the newest such mail.
 fn confirm_in_folder(
     store: &mut dyn MailStore,
     folder: &MailboxName,
@@ -199,12 +200,17 @@ fn confirm_in_folder(
     required_flag: Option<&str>,
 ) -> Result<(), Error> {
     store.select(folder)?;
-    let found = store.find_message_id(id)?;
-    let Some(uid) = found.iter().max().copied() else {
+    let candidates = store.find_message_id(id)?;
+    let newest = store
+        .headers(&candidates)?
+        .into_iter()
+        .filter(|h| model::summary_from_header(h).message_id.as_ref() == Some(id))
+        .max_by_key(|h| h.uid);
+    let Some(header) = newest else {
         return Err(Error::NotConfirmed(format!("{id} not found in {folder}")));
     };
     if let Some(flag) = required_flag
-        && !has_flag(&header_of(store, uid)?, flag)
+        && !has_flag(&header.flags, flag)
     {
         return Err(Error::NotConfirmed(format!(
             "{flag} not set on {id} in {folder}"
@@ -239,14 +245,13 @@ pub fn move_mail(
             store.add_flags(uid, &[FLAG_SEEN])?;
         }
         store.move_to(uid, target)?;
+        store.select(folder)?;
+        if store.uids()?.contains(&uid) {
+            return Err(Error::NotConfirmed(format!("UID {uid} still in {folder}")));
+        }
         if let Some(id) = &mail.message_id {
             let flag = mark_read_first.then_some(FLAG_SEEN);
             confirm_in_folder(store, target, id, flag)?;
-        } else {
-            store.select(folder)?;
-            if store.uids()?.contains(&uid) {
-                return Err(Error::NotConfirmed(format!("UID {uid} still in {folder}")));
-            }
         }
         confirmed = true;
     }
@@ -288,6 +293,24 @@ pub fn create_folder(
         dry_run,
         confirmed,
     })
+}
+
+/// After sending: flags the original as `$Forwarded`, then stores the copy in
+/// the sent folder, and confirms both.
+fn record_forward(
+    store: &mut dyn MailStore,
+    job: &ForwardJob<'_>,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    store.add_flags(job.uid, &[FLAG_FORWARDED])?;
+    if !has_flag(&header_of(store, job.uid)?.flags, FLAG_FORWARDED) {
+        return Err(Error::NotConfirmed(format!(
+            "{FLAG_FORWARDED} not set on UID {}",
+            job.uid
+        )));
+    }
+    store.append(job.sent_folder, bytes, &[FLAG_SEEN])?;
+    confirm_in_folder(store, job.sent_folder, job.new_message_id, None)
 }
 
 /// Everything [`forward`] needs besides the connections.
@@ -347,15 +370,15 @@ pub fn forward(
     let mut confirmed = false;
     if !job.dry_run {
         sender.send(job.from, job.to, &bytes)?;
-        store.append(job.sent_folder, &bytes, &[FLAG_SEEN])?;
-        store.add_flags(job.uid, &[FLAG_FORWARDED])?;
-        if !has_flag(&header_of(store, job.uid)?, FLAG_FORWARDED) {
-            return Err(Error::NotConfirmed(format!(
-                "{FLAG_FORWARDED} not set on UID {}",
-                job.uid
-            )));
-        }
-        confirm_in_folder(store, job.sent_folder, job.new_message_id, None)?;
+        // The mail is out. Flag the original first, so a retry is refused as
+        // `AlreadyForwarded` even if storing the copy fails; report anything
+        // that fails from here on as partly done instead of as a plain error.
+        record_forward(store, job, &bytes).map_err(|e| {
+            Error::Partial(format!(
+                "UID {} was forwarded to {}, but {e}",
+                job.uid, job.to
+            ))
+        })?;
         confirmed = true;
     }
     Ok(ActionReport {
