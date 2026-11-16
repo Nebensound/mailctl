@@ -79,16 +79,19 @@ jobs:
           python3 - <<'PY'
           import json
           data = json.load(open("coverage.json"))["data"][0]
-          seen = set()
+          # A region counts as covered if any instantiation ran it.
+          counts = {}
           for function in data["functions"]:
               for region in function["regions"]:
                   line, col, end_line, end_col, count, file_id, _, kind = region
-                  if count == 0 and kind == 0:
-                      name = function["filenames"][file_id].split("/src/")[-1]
-                      if name.startswith("tests/") or name == "testing.rs":
-                          continue
-                      seen.add((name, line, col, end_line, end_col))
-          for item in sorted(seen):
+                  if kind != 0:
+                      continue
+                  name = function["filenames"][file_id].split("/src/")[-1]
+                  if name.startswith("tests/") or name == "testing.rs":
+                      continue
+                  key = (name, line, col, end_line, end_col)
+                  counts[key] = max(counts.get(key, 0), count)
+          for item in sorted(k for k, v in counts.items() if v == 0):
               print("%s:%d:%d-%d:%d" % item)
           PY
 

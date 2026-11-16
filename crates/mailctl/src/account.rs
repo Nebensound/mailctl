@@ -558,12 +558,17 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
     let (secret, sent_folder) = verify_new_account(backend, args, &password, &mut probe)?;
     probe.sent_folder = sent_folder.clone();
     probe.access = args.access;
-    let new_text = setup::add_account(&text, &probe)?;
+    // The edit is validated in a dry run as well; it is only written for real.
+    setup::add_account(&text, &probe).and_then(|new_text| {
+        if args.dry_run {
+            Ok(())
+        } else {
+            backend.write_file(&path, &new_text)
+        }
+    })?;
     let mut password_stored = false;
     if !args.dry_run {
-        // Config first: storing the password with `-U` would overwrite an item
-        // another account shares, and that must not happen for a failed add.
-        backend.write_file(&path, &new_text)?;
+        // The configuration is written first, and the keychain only after it.
         if let (PasswordSource::Keychain(service), Some(secret)) = (&password, &secret) {
             backend
                 .keychain_store(service, probe.keychain_account(), secret)
@@ -702,10 +707,9 @@ fn remove(
     delete_password: bool,
 ) -> Result<u8, Error> {
     let (path, text, account) = load(cli, backend, name)?;
-    let new_text = setup::remove_account(&text, name)?;
     // Config first: a leftover keychain item is harmless, a configured account
     // whose item is gone is not.
-    backend.write_file(&path, &new_text)?;
+    setup::remove_account(&text, name).and_then(|new_text| backend.write_file(&path, &new_text))?;
     let mut password_deleted = false;
     if let (true, PasswordSource::Keychain(service)) = (delete_password, &account.password) {
         backend
