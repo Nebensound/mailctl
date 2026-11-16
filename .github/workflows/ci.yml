@@ -22,7 +22,7 @@ jobs:
     name: fmt and clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -39,7 +39,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -57,7 +57,7 @@ jobs:
       RUSTUP_TOOLCHAIN: nightly-2026-11-14
       COVERAGE_IGNORE: '(testing\.rs|src/tests/)'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: nightly-2026-11-14
@@ -101,7 +101,7 @@ jobs:
     name: licenses and advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
@@ -114,7 +114,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
