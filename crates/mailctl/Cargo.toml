@@ -1,0 +1,39 @@
+[package]
+name = "mailctl"
+version = "0.0.3"
+description = "Safe, agent-friendly IMAP/SMTP command line tool for sorting mailboxes: per-account access levels, verified changes, no delete."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+keywords = ["imap", "email", "cli", "agent", "mailbox"]
+categories = ["command-line-utilities", "email"]
+
+[[bin]]
+name = "mailctl"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+imap.workspace = true
+imap-proto.workspace = true
+lettre.workspace = true
+hickory-resolver.workspace = true
+mail-parser.workspace = true
+native-tls.workspace = true
+roxmltree.workspace = true
+rpassword.workspace = true
+tokio.workspace = true
+toml_edit.workspace = true
+ureq.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,107 @@
+# Self-contained CI that mirrors the Nebensound Coding Guidelines for Rust.
+# It does not use Nebensound's private central workflows, so anyone can
+# reproduce every check of this public repository.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.97.0"
+
+jobs:
+  lint:
+    name: fmt and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features --locked
+
+  coverage:
+    name: coverage (100% gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # Adapters (network, keychain, terminal) and main.rs are excluded; see
+      # "Coverage deviation" in the README.
+      - run: >-
+          cargo llvm-cov --workspace --all-features --locked
+          --ignore-filename-regex '(adapters/|main\.rs|testing\.rs)'
+          --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
+
+  dependencies:
+    name: licenses and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
+  release:
+    name: release build and smoke test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: smoke test outside the source tree
+        shell: bash
+        run: |
+          bin="$PWD/target/release/mailctl"
+          cd "$RUNNER_TEMP"
+          "$bin" --version
+          "$bin" ref '<a@example.com>' | grep -q '"mail_ref"'
+          printf '[[accounts]]\nname = "ro"\nuser = "a@example.com"\naddress = "a@example.com"\nimap_host = "127.0.0.1"\nsmtp_host = "127.0.0.1"\nsent_folder = "Sent"\npassword = { env = "PW" }\n' > cfg.toml
+          set +e
+          PW=x "$bin" --config cfg.toml move -a ro --uid 1 --expect 0123456789 --to X > out.json
+          code=$?
+          set -e
+          test "$code" -eq 2
+          grep -q 'is set to `read`' out.json

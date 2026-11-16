@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = ["crates/mailctl"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Nebensound/mailctl"
+publish = false
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+imap = "3.0.0-alpha.15"
+imap-proto = "=0.16.7"
+lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "native-tls", "hostname"] }
+hickory-resolver = "0.26.3"
+mail-parser = "0.11.9"
+native-tls = "0.2.18"
+roxmltree = "0.21.2"
+rpassword = "7.5.5"
+tokio = { version = "1", default-features = false, features = ["rt"] }
+toml_edit = "0.25.19"
+ureq = { version = "3.5.2", default-features = false, features = ["native-tls", "gzip"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10"
+thiserror = "2"
+toml = "1.2.1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
+warnings = "deny"
+unexpected_cfgs = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+arithmetic_side_effects = "deny"
+allow_attributes_without_reason = "deny"
+module_name_repetitions = "allow"
+
+[profile.release]
+strip = true
