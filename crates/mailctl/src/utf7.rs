@@ -83,12 +83,17 @@ fn decode_chunk(encoded: &str, wire: &str) -> Result<String, Error> {
     let mut bit_count: u32 = 0;
     let mut bytes = Vec::new();
     for symbol in encoded.bytes() {
-        let value = ALPHABET.iter().position(|&a| a == symbol).ok_or_else(bad)?;
-        bits = (bits << 6) | u32::try_from(value).map_err(|_| bad())?;
+        let value = ALPHABET
+            .iter()
+            .zip(0_u32..)
+            .find_map(|(&a, v)| (a == symbol).then_some(v))
+            .ok_or_else(bad)?;
+        bits = (bits << 6) | value;
         bit_count = bit_count.saturating_add(6);
         if bit_count >= 8 {
             bit_count = bit_count.saturating_sub(8);
-            bytes.push(u8::try_from((bits >> bit_count) & 0xff).map_err(|_| bad())?);
+            let [.., byte] = (bits >> bit_count).to_be_bytes();
+            bytes.push(byte);
         }
     }
     let units: Vec<u16> = bytes

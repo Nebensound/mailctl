@@ -67,7 +67,8 @@ pub enum AccountCommand {
         /// Account name.
         #[arg(short, long)]
         account: String,
-        /// Also delete the password from the keychain.
+        /// Also delete the password from the keychain, unless another account
+        /// uses the same keychain item.
         #[arg(long)]
         delete_password: bool,
     },
@@ -136,9 +137,7 @@ pub enum AllowlistCommand {
 }
 
 fn emit<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<u8, Error> {
-    let json = serde_json::to_string_pretty(value)
-        .map_err(|e| Error::InvalidInput(format!("output: {e}")))?;
-    writeln!(out, "{json}").map_err(|e| Error::InvalidInput(format!("output: {e}")))?;
+    crate::cli::write_json(out, value)?;
     Ok(0)
 }
 
@@ -664,12 +663,20 @@ fn remove(
 ) -> Result<u8, Error> {
     let (path, text, account) = load(cli, backend, name)?;
     let new_text = setup::remove_account(&text, name)?;
-    backend.write_file(&path, &new_text)?;
+    // Another account may log in with the same keychain item; keep it then.
+    let shared = Config::parse(&new_text)?
+        .accounts
+        .iter()
+        .any(|other| other.password == account.password && other.user == account.user);
     let mut password_deleted = false;
-    if let (true, PasswordSource::Keychain(service)) = (delete_password, &account.password) {
+    if let (true, false, PasswordSource::Keychain(service)) =
+        (delete_password, shared, &account.password)
+    {
+        // Before the file is written: if this fails, nothing has changed.
         backend.keychain_delete(service, &account.user)?;
         password_deleted = true;
     }
+    backend.write_file(&path, &new_text)?;
     emit(
         out,
         &RemoveReport {

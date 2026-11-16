@@ -545,9 +545,10 @@ fn remove_deletes_keychain_item_and_reports_missing_sent() -> Result<(), Error> 
             "INBOX",
         ],
     )?;
+    // `two` logs in with the same keychain item, so it stays.
     let (v, _) = exec(&b, &["account", "remove", "-a", "one", "--delete-password"])?;
-    assert_eq!(at(&v, "/password_deleted"), true);
-    assert!(b.keychain.borrow().is_empty());
+    assert_eq!(at(&v, "/password_deleted"), false);
+    assert_eq!(b.keychain.borrow().len(), 1);
     b.env_password.replace(Some("x".into()));
     let text = b
         .file_text()
@@ -555,9 +556,6 @@ fn remove_deletes_keychain_item_and_reports_missing_sent() -> Result<(), Error> 
     b.files
         .borrow_mut()
         .insert(PathBuf::from("/cfg.toml"), text);
-    b.keychain
-        .borrow_mut()
-        .insert(("mailctl".into(), "alice".into()), "b".into());
     let (v, _) = exec(&b, &["account", "test", "-a", "two"])?;
     assert_eq!(
         (
@@ -569,5 +567,161 @@ fn remove_deletes_keychain_item_and_reports_missing_sent() -> Result<(), Error> 
             &serde_json::Value::from("Sent")
         )
     );
+    Ok(())
+}
+
+/// A backend with two configured accounts, `work` (keychain) and `other`.
+fn configured() -> Result<FakeBackend, Error> {
+    let b = FakeBackend::new(plesk_net());
+    b.passwords
+        .borrow_mut()
+        .extend(["pw".to_owned(), "pw".to_owned()]);
+    for (name, user) in [("work", "alice"), ("other", "bob")] {
+        let (v, code) = exec(
+            &b,
+            &[
+                "account",
+                "add",
+                "--name",
+                name,
+                "--address",
+                "alice@example.com",
+                "--user",
+                user,
+            ],
+        )?;
+        assert_eq!(code, 0, "{v}");
+    }
+    exec(&b, &["allowlist", "add", "accounting@example.com"])?;
+    b.calls.set(0);
+    b.passwords.borrow_mut().push("new".into());
+    b.answers.borrow_mut().extend([
+        "mail.example.org".to_owned(),
+        String::new(),
+        String::new(),
+        "465".into(),
+        String::new(),
+    ]);
+    b.stdin.borrow_mut().push_str("pw\n");
+    Ok(b)
+}
+
+/// Every account command that reads or writes something outside the process.
+const ACCOUNT_COMMANDS: &[&[&str]] = &[
+    &["account", "discover", "alice@example.com"],
+    &[
+        "account",
+        "add",
+        "--name",
+        "new",
+        "--address",
+        "alice@example.com",
+    ],
+    &[
+        "account",
+        "add",
+        "--name",
+        "man",
+        "--address",
+        "a@example.org",
+    ],
+    &[
+        "account",
+        "add",
+        "--name",
+        "piped",
+        "--address",
+        "alice@example.com",
+        "--password-stdin",
+    ],
+    &["account", "test", "-a", "work", "--smtp"],
+    &["account", "set-password", "-a", "work"],
+    &["account", "set-access", "-a", "work", "organize"],
+    &["account", "remove", "-a", "other", "--delete-password"],
+    &["allowlist", "add", "x@example.de"],
+    &["allowlist", "remove", "accounting@example.com"],
+];
+
+/// Runs `args` on fresh backends with the n-th failure injected, for
+/// n = 0, 1, … until it succeeds; every run before must report an error
+/// and leave the configuration file unchanged.
+fn fails_cleanly(args: &[&str], inject: &dyn Fn(&mut FakeBackend, usize)) -> Result<usize, Error> {
+    for n in 0..64 {
+        let mut b = configured()?;
+        let before = b.file_text();
+        inject(&mut b, n);
+        let (v, code) = exec(&b, args)?;
+        if code == 0 {
+            return Ok(n);
+        }
+        assert!(at(&v, "/error").is_string(), "{args:?} at {n}: {v}");
+        assert_eq!(b.file_text(), before, "{args:?} at {n}");
+    }
+    Err(Error::Store(format!("{args:?} never succeeded")))
+}
+
+#[test]
+fn every_backend_and_server_failure_is_reported() -> Result<(), Error> {
+    for args in ACCOUNT_COMMANDS {
+        fails_cleanly(args, &|b, n| b.fail_at = Some(n))?;
+        fails_cleanly(args, &|b, n| b.store_fail_at = Some(n))?;
+    }
+    Ok(())
+}
+
+#[test]
+fn invalid_addresses_are_refused() -> Result<(), Error> {
+    for args in [
+        &["account", "discover", "nobody"][..],
+        &["account", "add", "--name", "n", "--address", "nobody"],
+        &["allowlist", "add", "nobody"],
+        &["allowlist", "remove", "nobody"],
+    ] {
+        let b = configured()?;
+        let before = b.file_text();
+        let (v, code) = exec(&b, args)?;
+        assert_eq!(code, 2, "{args:?}");
+        assert!(
+            at(&v, "/error")
+                .as_str()
+                .is_some_and(|e| e.contains("invalid e-mail address")),
+            "{args:?}: {v}"
+        );
+        assert_eq!(b.file_text(), before);
+    }
+    Ok(())
+}
+
+#[test]
+fn output_errors_are_reported() -> Result<(), Error> {
+    struct Broken;
+    impl std::io::Write for Broken {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("closed"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let b = configured()?;
+    let cli = Cli::try_parse_from(["mailctl", "account", "discover", "alice@example.com"])
+        .map_err(|e| Error::InvalidInput(e.to_string()))?;
+    assert_eq!(run(&cli, &b, &mut Broken), 2);
+    Ok(())
+}
+
+#[test]
+fn remove_deletes_an_unshared_keychain_item() -> Result<(), Error> {
+    let b = configured()?;
+    let (v, code) = exec(
+        &b,
+        &["account", "remove", "-a", "other", "--delete-password"],
+    )?;
+    assert_eq!(
+        (code, at(&v, "/password_deleted")),
+        (0, &serde_json::Value::from(true))
+    );
+    let keys: Vec<(String, String)> = b.keychain.borrow().keys().cloned().collect();
+    assert_eq!(keys, vec![("mailctl".to_owned(), "alice".to_owned())]);
     Ok(())
 }

@@ -255,3 +255,60 @@ fn helpers() {
     assert_eq!(base_domain("localhost"), "localhost");
     assert_eq!(smtp_security(465), Security::Tls);
 }
+
+#[test]
+fn skips_incomplete_server_entries() -> Result<(), Error> {
+    let complete = r#"<incomingServer type="imap"><hostname>mail.example.net</hostname><port>993</port><socketType>SSL</socketType></incomingServer>"#;
+    for incomplete in [
+        r#"<incomingServer type="imap"><port>993</port><socketType>SSL</socketType></incomingServer>"#,
+        r#"<incomingServer type="imap"><hostname>a.example.net</hostname><socketType>SSL</socketType></incomingServer>"#,
+        r#"<incomingServer type="imap"><hostname>a.example.net</hostname><port>993</port></incomingServer>"#,
+    ] {
+        let xml = format!(
+            r#"<clientConfig><emailProvider>{incomplete}{complete}<outgoingServer type="smtp"><hostname>mail.example.net</hostname><port>465</port><socketType>SSL</socketType></outgoingServer></emailProvider></clientConfig>"#
+        );
+        let settings = parse_autoconfig(&xml, &ns()?).ok_or(Error::NotFound(0))?;
+        assert_eq!(settings.imap.host, "mail.example.net", "{incomplete}");
+    }
+    Ok(())
+}
+
+#[test]
+fn srv_without_submission_records_is_not_used() -> Result<(), Error> {
+    let mut net = FakeNet {
+        ok: ok(&[("imap.x.de", 993)]),
+        ..FakeNet::default()
+    };
+    net.srv.insert(
+        "_imaps._tcp.example.com".into(),
+        vec![SrvRecord {
+            target: "imap.x.de".into(),
+            port: 993,
+            priority: 0,
+            weight: 0,
+        }],
+    );
+    let err = discover(&ns()?, &mut net);
+    assert!(
+        matches!(&err, Err(Error::NoServerFound(m)) if m.contains("DNS SRV records: nothing found")),
+        "{err:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn unusable_ispdb_entry_for_mx_domain_falls_through() -> Result<(), Error> {
+    let mut net = FakeNet::default();
+    net.mx
+        .insert("example.com".into(), vec!["mx.example.net".into()]);
+    net.pages.insert(
+        "https://autoconfig.thunderbird.net/v1.1/example.net".into(),
+        AUTOCONFIG.into(),
+    );
+    let err = discover(&ns()?, &mut net);
+    assert!(
+        matches!(&err, Err(Error::NoServerFound(m)) if m.contains("MX domain example.net: found, but not usable")),
+        "{err:?}"
+    );
+    Ok(())
+}

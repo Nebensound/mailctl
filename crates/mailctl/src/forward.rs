@@ -35,11 +35,16 @@ fn subject_for(original: &str) -> String {
     }
 }
 
+/// Maps a transport error to [`Error::InvalidInput`] with `context` in front.
+fn invalid<E: std::fmt::Display>(context: String) -> impl FnOnce(E) -> Error {
+    move |e| Error::InvalidInput(format!("{context}: {e}"))
+}
+
 fn mailbox(address: &EmailAddress) -> Result<Mailbox, Error> {
     address
         .as_str()
         .parse()
-        .map_err(|e| Error::InvalidInput(format!("address {address}: {e}")))
+        .map_err(invalid(format!("address {address}")))
 }
 
 /// Builds the forward as raw RFC 5322 bytes.
@@ -81,19 +86,21 @@ Subject: {subject}
     for part in parsed.attachments() {
         let name = part.attachment_name().unwrap_or("attachment").to_owned();
         let content_type = ContentType::parse(&mime_of(part.content_type()))
-            .map_err(|e| Error::InvalidInput(format!("attachment type: {e}")))?;
+            .map_err(invalid("attachment type".to_owned()))?;
         parts =
             parts.singlepart(Attachment::new(name).body(part.contents().to_vec(), content_type));
     }
 
-    let message = Message::builder()
+    // Sender and recipient are always set, so assembling cannot fail in
+    // practice; the error is still mapped instead of unwrapped.
+    Message::builder()
         .from(mailbox(request.from)?)
         .to(mailbox(request.to)?)
         .subject(subject_for(subject))
         .message_id(Some(format!("<{}>", request.message_id)))
         .multipart(parts)
-        .map_err(|e| Error::InvalidInput(format!("cannot build forward: {e}")))?;
-    Ok(message.formatted())
+        .map(|message| message.formatted())
+        .map_err(invalid("cannot build forward".to_owned()))
 }
 
 #[cfg(test)]

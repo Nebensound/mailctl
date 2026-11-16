@@ -370,3 +370,120 @@ fn mismatch_reports_ref_for_mails_without_id() -> Result<(), Error> {
     );
     Ok(())
 }
+
+/// Runs `operation` against a fresh store whose n-th server call fails, for
+/// n = 0, 1, … until the operation needs fewer calls than that. Every run
+/// before must end in exactly that server error, and must not report success.
+fn fails_cleanly_at_every_call(
+    fresh: &dyn Fn() -> FakeStore,
+    operation: &dyn Fn(&mut FakeStore) -> Result<(), Error>,
+) -> Result<usize, Error> {
+    for call in 0..64 {
+        let mut store = fresh();
+        store.fail_at_call = Some(call);
+        match operation(&mut store) {
+            Ok(()) => return Ok(call),
+            Err(Error::Store(message)) if message == "simulated failure" => {}
+            Err(other) => return Err(other),
+        }
+    }
+    Err(Error::Store("operation never finished".into()))
+}
+
+#[test]
+fn every_server_failure_aborts_the_operation() -> Result<(), Error> {
+    let config = crate::testing::config()?;
+    let inbox = folder("INBOX")?;
+    let target = folder("Work/GitHub")?;
+    let sent = folder("Sent")?;
+    let new = folder("New")?;
+    let from = EmailAddress::parse("alice@example.com")?;
+    let to = EmailAddress::parse("accounting@example.com")?;
+    let new_id = MessageId::parse("fwd@mailctl")?;
+    let by_id = expect("m2@test")?;
+    let fresh = || FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])]);
+    let no_id = FakeStore::raw_mail(4, b"From: z@x.de\r\nSubject: s\r\n\r\nx".to_vec(), &[]);
+    let without_id = || FakeStore::with_inbox(vec![no_id.clone()]);
+    let by_ref = Expect::Ref(
+        list(&mut without_id(), &inbox, 1, None)?
+            .first()
+            .ok_or(Error::NotFound(4))?
+            .mail_ref
+            .clone(),
+    );
+
+    let calls = [
+        fails_cleanly_at_every_call(&fresh, &|s| list(s, &inbox, 10, None).map(drop))?,
+        fails_cleanly_at_every_call(&fresh, &|s| {
+            show(s, &inbox, uid(2)?, Some(&by_id), 100).map(drop)
+        })?,
+        fails_cleanly_at_every_call(&fresh, &|s| {
+            mark_read(s, &inbox, uid(2)?, &by_id, false).map(drop)
+        })?,
+        fails_cleanly_at_every_call(&fresh, &|s| {
+            move_mail(s, &inbox, uid(2)?, &by_id, &target, true, false).map(drop)
+        })?,
+        fails_cleanly_at_every_call(&without_id, &|s| {
+            move_mail(s, &inbox, uid(4)?, &by_ref, &target, false, false).map(drop)
+        })?,
+        fails_cleanly_at_every_call(&fresh, &|s| create_folder(s, &new, false).map(drop))?,
+        fails_cleanly_at_every_call(&fresh, &|s| {
+            let job = ForwardJob {
+                folder: &inbox,
+                uid: uid(2)?,
+                expect: &by_id,
+                to: &to,
+                from: &from,
+                sent_folder: &sent,
+                new_message_id: &new_id,
+                note: None,
+                dry_run: false,
+            };
+            forward(s, &mut FakeSender::default(), &config, &job).map(drop)
+        })?,
+    ];
+    // list: select, uids, headers; show: select, headers, message; mark_read:
+    // select, headers, flag, headers; move by id: folders, capability, select,
+    // headers, flag, move, select, search, headers; move without id ends with
+    // select and uids; create: folders, create, folders; forward: select,
+    // headers, message, append, flag, headers, select, search.
+    assert_eq!(calls, [3, 3, 4, 9, 7, 3, 8]);
+    Ok(())
+}
+
+#[test]
+fn forward_refuses_originals_it_cannot_rebuild() -> Result<(), Error> {
+    let config = crate::testing::config()?;
+    let inbox = folder("INBOX")?;
+    let sent = folder("Sent")?;
+    let from = EmailAddress::parse("alice@example.com")?;
+    let to = EmailAddress::parse("accounting@example.com")?;
+    let new_id = MessageId::parse("fwd@mailctl")?;
+    let by_id = expect("m3@test")?;
+    let odd = FakeStore::raw_mail(
+        3,
+        b"Message-ID: <m3@test>\r\nSubject: odd\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\nContent-Type: application/pdf@x\r\nContent-Disposition: attachment; filename=a.pdf\r\n\r\nxx\r\n--b--\r\n".to_vec(),
+        &[],
+    );
+    let mut store = FakeStore::with_inbox(vec![odd]);
+    let before = store.snapshot();
+    let mut sender = FakeSender::default();
+    let job = ForwardJob {
+        folder: &inbox,
+        uid: uid(3)?,
+        expect: &by_id,
+        to: &to,
+        from: &from,
+        sent_folder: &sent,
+        new_message_id: &new_id,
+        note: None,
+        dry_run: false,
+    };
+    assert!(matches!(
+        forward(&mut store, &mut sender, &config, &job),
+        Err(Error::InvalidInput(_))
+    ));
+    assert!(sender.sent.is_empty());
+    assert_eq!(store.snapshot(), before);
+    Ok(())
+}

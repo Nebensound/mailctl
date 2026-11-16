@@ -249,12 +249,23 @@ pub trait Backend {
     fn check_smtp(&self, account: &AccountConfig, secret: &Secret) -> Result<(), Error>;
 }
 
-fn to_json<T: Serialize>(value: &T) -> Result<String, Error> {
-    serde_json::to_string_pretty(value).map_err(|e| Error::InvalidInput(format!("output: {e}")))
+fn output_error(e: impl std::fmt::Display) -> Error {
+    Error::InvalidInput(format!("output: {e}"))
 }
 
-fn write_line(out: &mut dyn Write, text: &str) -> Result<(), Error> {
-    writeln!(out, "{text}").map_err(|e| Error::InvalidInput(format!("output: {e}")))
+/// Writes `value` as pretty-printed JSON followed by a newline.
+///
+/// # Errors
+/// [`Error::InvalidInput`] if `out` fails.
+pub(crate) fn write_json<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<(), Error> {
+    serde_json::to_writer_pretty(&mut *out, value).map_err(output_error)?;
+    writeln!(out).map_err(output_error)
+}
+
+/// Writes `value` as one line of JSON (for ndjson).
+fn write_json_line<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<(), Error> {
+    serde_json::to_writer(&mut *out, value).map_err(output_error)?;
+    writeln!(out).map_err(output_error)
 }
 
 #[derive(Serialize)]
@@ -291,7 +302,7 @@ struct RefOutput {
 }
 
 /// Runs a parsed command line and writes JSON to `out`. Never panics; errors
-/// become a JSON object with an `error` field.
+/// become a one-line JSON object with an `error` field.
 ///
 /// Returns the process exit code: 0 success, 1 some plan operations failed,
 /// 2 error.
@@ -299,18 +310,21 @@ pub fn run(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write) -> u8 {
     match dispatch(cli, backend, out) {
         Ok(code) => code,
         Err(e) => {
-            let json = to_json(&ErrorOutput {
-                error: &e.to_string(),
-            })
-            .unwrap_or_else(|_| "{\"error\":\"unprintable error\"}".to_owned());
-            let _ = write_line(out, &json);
+            // One line, so ndjson readers can parse it too. Nothing more can
+            // be done if even the error cannot be written.
+            let _ = write_json_line(
+                out,
+                &ErrorOutput {
+                    error: &e.to_string(),
+                },
+            );
             2
         }
     }
 }
 
 fn emit<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<u8, Error> {
-    write_line(out, &to_json(value)?)?;
+    write_json(out, value)?;
     Ok(0)
 }
 
@@ -347,15 +361,17 @@ impl<'a> Session<'a> {
         )))
     }
 
+    /// The SMTP connection, or [`NoSender`] (which refuses every message)
+    /// below [`Access::Send`]: no SMTP connection is made without send access.
     fn sender(&self) -> Result<Box<dyn MailSender>, Error> {
-        self.require(Access::Send)?;
+        if self.account.access < Access::Send {
+            return Ok(Box::new(NoSender));
+        }
         self.backend.sender(&self.account, &self.secret)
     }
 
-    fn new_message_id(&self, counter: u32) -> Result<MessageId, Error> {
-        let time = self.backend.unix_time();
-        let domain = self.account.address.domain();
-        MessageId::parse(&format!("mailctl-{time}-{counter}@{domain}"))
+    fn new_message_id(&self, counter: u32) -> MessageId {
+        MessageId::generated(self.backend.unix_time(), counter, &self.account.address)
     }
 }
 
@@ -538,11 +554,7 @@ fn list(
                 request.limit,
                 before,
                 service::FETCH_CHUNK,
-                &mut |mail| {
-                    let line = serde_json::to_string(&Listed { folder, mail })
-                        .map_err(|e| Error::InvalidInput(format!("output: {e}")))?;
-                    write_line(out, &line)
-                },
+                &mut |mail| write_json_line(out, &Listed { folder, mail }),
             )?;
         }
         return Ok(0);
@@ -609,7 +621,7 @@ fn forward(
 ) -> Result<u8, Error> {
     let (session, folder, uid, expect) = open_target(cli, backend, target, Access::Send)?;
     let to = EmailAddress::parse(to)?;
-    let id = session.new_message_id(1)?;
+    let id = session.new_message_id(1);
     let job = ForwardJob {
         folder: &folder,
         uid,
@@ -637,8 +649,7 @@ fn apply(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, plan: &Path) -> 
         .ops
         .iter()
         .any(|op| matches!(op, plan::PlanOp::Forward { .. }));
-    let mut sender: Box<dyn MailSender> = if needs_sender && session.account.access >= Access::Send
-    {
+    let mut sender: Box<dyn MailSender> = if needs_sender {
         session.sender()?
     } else {
         Box::new(NoSender)
@@ -646,7 +657,7 @@ fn apply(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, plan: &Path) -> 
     let mut counter = 0_u32;
     let mut ids = || {
         counter = counter.saturating_add(1);
-        session.new_message_id(counter)
+        Ok(session.new_message_id(counter))
     };
     let result = plan::run(
         &plan,
@@ -656,7 +667,7 @@ fn apply(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, plan: &Path) -> 
         sender.as_mut(),
         &mut ids,
     );
-    write_line(out, &to_json(&result)?)?;
+    write_json(out, &result)?;
     Ok(u8::from(result.failed > 0))
 }
 

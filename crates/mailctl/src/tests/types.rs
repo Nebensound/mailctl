@@ -76,3 +76,12 @@ fn expect_distinguishes_refs_and_ids() -> Result<(), Error> {
     assert!(Expect::parse(" ").is_err());
     Ok(())
 }
+
+#[test]
+fn generated_message_ids_use_the_sender_domain() -> Result<(), Error> {
+    let from = EmailAddress::parse("Alice@Example.com")?;
+    let id = MessageId::generated(1_700_000_000, 3, &from);
+    assert_eq!(id.as_str(), "mailctl-1700000000-3@example.com");
+    assert_eq!(MessageId::parse(id.as_str())?, id);
+    Ok(())
+}

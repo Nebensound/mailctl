@@ -59,6 +59,14 @@ impl MessageId {
         Ok(Self(inner.to_owned()))
     }
 
+    /// A new `Message-ID` for a message sent from `from`:
+    /// `mailctl-<time>-<counter>@<domain>`. Valid by construction, because an
+    /// [`EmailAddress`] contains no whitespace.
+    #[must_use]
+    pub fn generated(time: u64, counter: u32, from: &EmailAddress) -> Self {
+        Self(format!("mailctl-{time}-{counter}@{}", from.domain()))
+    }
+
     /// The value without angle brackets.
     #[must_use]
     pub fn as_str(&self) -> &str {

@@ -134,3 +134,29 @@ fn picks_sent_folder() -> Result<(), Error> {
     assert_eq!(pick_sent_folder(&[f("INBOX", None, true)?]), None);
     Ok(())
 }
+
+#[test]
+fn edits_refuse_broken_files() -> Result<(), Error> {
+    let address = EmailAddress::parse("accounting@example.com")?;
+    for broken in ["x = [", "accounts = 1"] {
+        assert!(
+            matches!(remove_account(broken, "a"), Err(Error::Config(_))),
+            "{broken}"
+        );
+        assert!(
+            matches!(set_access(broken, "a", Access::Read), Err(Error::Config(_))),
+            "{broken}"
+        );
+    }
+    for broken in ["x = [", "forward_allowlist = \"accounting@example.com\""] {
+        assert!(
+            matches!(allowlist_add(broken, &address), Err(Error::Config(_))),
+            "{broken}"
+        );
+        assert!(
+            matches!(allowlist_remove(broken, &address), Err(Error::Config(_))),
+            "{broken}"
+        );
+    }
+    Ok(())
+}

@@ -141,8 +141,8 @@ options to pass (`--imap-host`, `--smtp-host`, `--imap-port`, `--smtp-port`,
 Other account commands: `account test -a NAME [--smtp]`,
 `account set-access -a NAME read|flag|organize|send`,
 `account set-password -a NAME [--password-stdin]` (checks the login before
-storing), `account remove -a NAME [--delete-password]`, and
-`allowlist add|remove ADDRESS`.
+storing), `account remove -a NAME [--delete-password]` (keeps a keychain item
+that another account still uses), and `allowlist add|remove ADDRESS`.
 
 ## Commands
 

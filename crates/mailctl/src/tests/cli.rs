@@ -39,6 +39,9 @@ struct TestBackend {
     store: Rc<RefCell<FakeStore>>,
     sent: Cell<usize>,
     fail_connect: bool,
+    /// Fail the backend call with this zero-based number.
+    fail_at: Option<usize>,
+    calls: Cell<usize>,
 }
 
 impl TestBackend {
@@ -55,27 +58,43 @@ impl TestBackend {
             ]))),
             sent: Cell::new(0),
             fail_connect: false,
+            fail_at: None,
+            calls: Cell::new(0),
+        }
+    }
+
+    fn step(&self) -> Result<(), Error> {
+        let call = self.calls.get();
+        self.calls.set(call.saturating_add(1));
+        if self.fail_at == Some(call) {
+            Err(Error::Store("simulated backend failure".into()))
+        } else {
+            Ok(())
         }
     }
 }
 
 impl Backend for TestBackend {
     fn read_config(&self, _path: Option<&PathBuf>) -> Result<String, Error> {
+        self.step()?;
         self.config.clone()
     }
     fn read_plan(&self, _path: &Path) -> Result<String, Error> {
+        self.step()?;
         Ok(self.plan.clone())
     }
     fn secrets(&self) -> &dyn SecretLookup {
         &self.env
     }
     fn connect(&self, _a: &AccountConfig, _s: &Secret) -> Result<Box<dyn MailStore>, Error> {
+        self.step()?;
         if self.fail_connect {
             return Err(Error::Store("connection refused".into()));
         }
         Ok(Box::new(Shared(Rc::clone(&self.store))))
     }
     fn sender(&self, _a: &AccountConfig, _s: &Secret) -> Result<Box<dyn MailSender>, Error> {
+        self.step()?;
         self.sent.set(self.sent.get().saturating_add(1));
         Ok(Box::new(FakeSender::default()))
     }
@@ -195,10 +214,16 @@ fn write_errors_are_reported() -> Result<(), Error> {
             Ok(())
         }
     }
-    let b = TestBackend::new();
-    let cli = Cli::try_parse_from(["mailctl", "list", "-a", "test", "--ndjson"])
-        .map_err(|e| Error::InvalidInput(e.to_string()))?;
-    assert_eq!(run(&cli, &b, &mut Broken), 2);
+    for args in [
+        &["list", "-a", "test", "--ndjson"][..],
+        &["list", "-a", "test"],
+        &["apply", "plan.json"],
+    ] {
+        let b = server_backend();
+        let cli = Cli::try_parse_from(std::iter::once("mailctl").chain(args.iter().copied()))
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        assert_eq!(run(&cli, &b, &mut Broken), 2, "{args:?}");
+    }
     Ok(())
 }
 
@@ -479,5 +504,130 @@ fn errors_become_json() -> Result<(), Error> {
 fn no_sender_refuses() -> Result<(), Error> {
     let addr = EmailAddress::parse("a@b.de")?;
     assert!(NoSender.send(&addr, &addr, b"x").is_err());
+    Ok(())
+}
+
+/// Commands that talk to the server, with a plan for `apply`.
+const SERVER_COMMANDS: &[&[&str]] = &[
+    &["folders", "-a", "test"],
+    &["list", "-a", "test"],
+    &["list", "-a", "test", "--all-folders"],
+    &["list", "-a", "test", "--ndjson", "--all-folders"],
+    &["show", "-a", "test", "--uid", "2"],
+    &["show", "-a", "test", "--uid", "2", "--expect", "m2@test"],
+    &["apply", "plan.json"],
+];
+
+fn server_backend() -> TestBackend {
+    let mut b = TestBackend::new();
+    b.plan = r#"{"account":"test","ops":[
+        {"op":"create_folder","name":"New"},
+        {"op":"mark_read","uid":2,"expect":"m2@test"},
+        {"op":"forward","uid":2,"expect":"m2@test","to":"accounting@example.com"},
+        {"op":"move","uid":3,"expect":"m3@test","to":"Work/GitHub","mark_read":true}]}"#
+        .into();
+    b
+}
+
+/// Runs `args` with the n-th failure injected by `inject`, for n = 0, 1, …
+/// until the command succeeds. Every run before must fail with a non-zero
+/// exit code; returns how many failure points there were.
+fn fails_at_every_step(
+    args: &[&str],
+    inject: &dyn Fn(&mut TestBackend, usize),
+) -> Result<usize, Error> {
+    for n in 0..64 {
+        let mut b = server_backend();
+        inject(&mut b, n);
+        let cli = Cli::try_parse_from(std::iter::once("mailctl").chain(args.iter().copied()))
+            .map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let mut out = Vec::new();
+        let code = run(&cli, &b, &mut out);
+        if code == 0 {
+            return Ok(n);
+        }
+        // An ndjson listing may have printed mails before the error line.
+        let text = String::from_utf8_lossy(&out);
+        let last = if args.contains(&"--ndjson") {
+            text.lines().last().unwrap_or_default().to_owned()
+        } else {
+            text.into_owned()
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&last).map_err(|e| Error::InvalidInput(e.to_string()))?;
+        let reported = at(&v, "/error").is_string() || at(&v, "/failed").as_u64() > Some(0);
+        assert!(reported, "{args:?} at {n}: {v}");
+    }
+    Err(Error::Store(format!("{args:?} never succeeded")))
+}
+
+#[test]
+fn every_backend_and_server_failure_is_reported() -> Result<(), Error> {
+    for args in SERVER_COMMANDS.iter().chain(CHANGES.iter()) {
+        let backend_steps = fails_at_every_step(args, &|b, n| b.fail_at = Some(n))?;
+        let server_steps =
+            fails_at_every_step(args, &|b, n| b.store.borrow_mut().fail_at_call = Some(n))?;
+        assert!(backend_steps >= 2, "{args:?}: config and connection");
+        assert!(server_steps >= 1, "{args:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn invalid_arguments_are_refused_before_connecting() -> Result<(), Error> {
+    let invalid: &[&[&str]] = &[
+        &["ref", " "],
+        &["list", "-a", "test", "--folder", ""],
+        &["list", "-a", "test", "--before", "0"],
+        &["show", "-a", "test", "--uid", "0"],
+        &["show", "-a", "test", "--uid", "2", "--folder", ""],
+        &["show", "-a", "test", "--uid", "2", "--expect", " "],
+        &[
+            "mark-read",
+            "-a",
+            "test",
+            "--uid",
+            "0",
+            "--expect",
+            "m2@test",
+        ],
+        &["mark-read", "-a", "test", "--uid", "2", "--expect", " "],
+        &[
+            "mark-read",
+            "-a",
+            "test",
+            "--uid",
+            "2",
+            "--expect",
+            "m2@test",
+            "--folder",
+            "",
+        ],
+        &[
+            "move", "-a", "test", "--uid", "2", "--expect", "m2@test", "--to", "",
+        ],
+        &["create-folder", "-a", "test", ""],
+        &[
+            "forward", "-a", "test", "--uid", "2", "--expect", "m2@test", "--to", "nobody",
+        ],
+    ];
+    for args in invalid {
+        let b = TestBackend::new();
+        let (v, code) = exec(&b, args)?;
+        assert_eq!(code, 2, "{args:?}");
+        assert!(
+            at(&v, "/error")
+                .as_str()
+                .is_some_and(|e| e.starts_with("invalid input")),
+            "{args:?}: {v}"
+        );
+        assert_eq!(b.store.borrow().mutations, 0, "{args:?}");
+        assert_eq!(b.sent.get(), 0, "{args:?}");
+    }
+    let mut b = TestBackend::new();
+    b.plan = "{".into();
+    let (v, code) = exec(&b, &["apply", "plan.json"])?;
+    assert_eq!(code, 2);
+    assert!(at(&v, "/error").is_string());
     Ok(())
 }

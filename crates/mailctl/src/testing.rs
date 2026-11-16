@@ -43,6 +43,10 @@ pub(crate) struct FakeStore {
     pub(crate) hide_bodies: bool,
     pub(crate) lose_appends: bool,
     pub(crate) fail_all: bool,
+    /// Fail the store call with this zero-based number (and only that one).
+    pub(crate) fail_at_call: Option<usize>,
+    /// Number of store calls so far.
+    pub(crate) calls: Cell<usize>,
     /// The selected folder was opened with `EXAMINE`.
     pub(crate) read_only: bool,
     /// Number of changing calls that reached the store.
@@ -117,6 +121,8 @@ impl FakeStore {
             hide_bodies: false,
             lose_appends: false,
             fail_all: false,
+            fail_at_call: None,
+            calls: Cell::new(0),
             read_only: false,
             mutations: 0,
         }
@@ -162,7 +168,9 @@ impl FakeStore {
     }
 
     fn check(&self) -> Result<(), Error> {
-        if self.fail_all {
+        let call = self.calls.get();
+        self.calls.set(call.saturating_add(1));
+        if self.fail_all || self.fail_at_call == Some(call) {
             Err(Error::Store("simulated failure".into()))
         } else {
             Ok(())
@@ -218,6 +226,7 @@ impl MailStore for FakeStore {
     }
 
     fn uids(&mut self) -> Result<Vec<Uid>, Error> {
+        self.check()?;
         Ok(self
             .current()?
             .iter()
@@ -226,6 +235,7 @@ impl MailStore for FakeStore {
     }
 
     fn headers(&mut self, uids: &[Uid]) -> Result<Vec<RawHeader>, Error> {
+        self.check()?;
         Ok(self
             .current()?
             .iter()
@@ -242,6 +252,7 @@ impl MailStore for FakeStore {
     }
 
     fn message(&mut self, uid: Uid) -> Result<Option<RawMessage>, Error> {
+        self.check()?;
         if self.hide_bodies {
             return Ok(None);
         }
@@ -257,6 +268,7 @@ impl MailStore for FakeStore {
     }
 
     fn add_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error> {
+        self.check()?;
         self.mutate()?;
         if self.ignore_flags {
             return Ok(());
@@ -272,10 +284,12 @@ impl MailStore for FakeStore {
     }
 
     fn supports_move(&mut self) -> Result<bool, Error> {
+        self.check()?;
         Ok(self.move_supported)
     }
 
     fn move_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
+        self.check()?;
         self.mutate()?;
         if self.stuck_moves {
             return Ok(());
@@ -297,6 +311,7 @@ impl MailStore for FakeStore {
     }
 
     fn find_message_id(&mut self, id: &MessageId) -> Result<Vec<Uid>, Error> {
+        self.check()?;
         let needle = format!("<{id}>");
         Ok(self
             .current()?
@@ -321,6 +336,7 @@ impl MailStore for FakeStore {
         message: &[u8],
         flags: &[&str],
     ) -> Result<(), Error> {
+        self.check()?;
         self.mutations = self.mutations.saturating_add(1);
         if self.lose_appends {
             return Ok(());
@@ -415,6 +431,12 @@ pub(crate) struct FakeBackend {
     pub(crate) terminal: bool,
     pub(crate) sent_folder_flag: bool,
     pub(crate) smtp_checks: Cell<usize>,
+    /// Fail the backend call with this zero-based number.
+    pub(crate) fail_at: Option<usize>,
+    /// Number of backend calls so far.
+    pub(crate) calls: Cell<usize>,
+    /// Passed on to every connected [`FakeStore`] as `fail_at_call`.
+    pub(crate) store_fail_at: Option<usize>,
 }
 
 const CONFIG_PATH: &str = "/cfg.toml";
@@ -432,6 +454,19 @@ impl FakeBackend {
             terminal: true,
             sent_folder_flag: true,
             smtp_checks: Cell::new(0),
+            fail_at: None,
+            calls: Cell::new(0),
+            store_fail_at: None,
+        }
+    }
+
+    fn step(&self) -> Result<(), Error> {
+        let call = self.calls.get();
+        self.calls.set(call.saturating_add(1));
+        if self.fail_at == Some(call) {
+            Err(Error::Store("simulated backend failure".into()))
+        } else {
+            Ok(())
         }
     }
 
@@ -464,6 +499,7 @@ impl SecretLookup for FakeBackend {
 
 impl Backend for FakeBackend {
     fn read_config(&self, _path: Option<&PathBuf>) -> Result<String, Error> {
+        self.step()?;
         Ok(self.file_text())
     }
     fn read_plan(&self, _path: &Path) -> Result<String, Error> {
@@ -473,25 +509,31 @@ impl Backend for FakeBackend {
         self
     }
     fn connect(&self, _a: &AccountConfig, _s: &Secret) -> Result<Box<dyn MailStore>, Error> {
+        self.step()?;
         let mut store = FakeStore::with_inbox(Vec::new());
+        store.fail_at_call = self.store_fail_at;
         if !self.sent_folder_flag {
             store.folders.remove("Sent");
         }
         Ok(Box::new(store))
     }
     fn sender(&self, _a: &AccountConfig, _s: &Secret) -> Result<Box<dyn MailSender>, Error> {
+        self.step()?;
         Ok(Box::new(FakeSender::default()))
     }
     fn unix_time(&self) -> u64 {
         1
     }
     fn config_path(&self, _explicit: Option<&PathBuf>) -> Result<PathBuf, Error> {
+        self.step()?;
         Ok(PathBuf::from(CONFIG_PATH))
     }
     fn read_optional(&self, path: &Path) -> Result<Option<String>, Error> {
+        self.step()?;
         Ok(self.files.borrow().get(path).cloned())
     }
     fn write_file(&self, path: &Path, text: &str) -> Result<(), Error> {
+        self.step()?;
         self.files
             .borrow_mut()
             .insert(path.to_path_buf(), text.to_owned());
@@ -502,19 +544,23 @@ impl Backend for FakeBackend {
         _question: &str,
         _default: Option<&str>,
     ) -> Result<Option<String>, Error> {
+        self.step()?;
         Ok(self
             .terminal
             .then(|| Self::pop(&self.answers).unwrap_or_default()))
     }
     fn prompt_password(&self, _prompt: &str) -> Result<Option<Secret>, Error> {
+        self.step()?;
         Ok(self
             .terminal
             .then(|| Secret::new(Self::pop(&self.passwords).unwrap_or_else(|| "pw".into()))))
     }
     fn read_stdin(&self) -> Result<String, Error> {
+        self.step()?;
         Ok(std::mem::take(&mut *self.stdin.borrow_mut()))
     }
     fn keychain_store(&self, service: &str, account: &str, secret: &Secret) -> Result<(), Error> {
+        self.step()?;
         self.keychain.borrow_mut().insert(
             (service.to_owned(), account.to_owned()),
             secret.expose().to_owned(),
@@ -522,6 +568,7 @@ impl Backend for FakeBackend {
         Ok(())
     }
     fn keychain_delete(&self, service: &str, account: &str) -> Result<(), Error> {
+        self.step()?;
         self.keychain
             .borrow_mut()
             .remove(&(service.to_owned(), account.to_owned()));
@@ -531,6 +578,7 @@ impl Backend for FakeBackend {
         Box::new(self.net.clone())
     }
     fn check_smtp(&self, _account: &AccountConfig, _secret: &Secret) -> Result<(), Error> {
+        self.step()?;
         self.smtp_checks
             .set(self.smtp_checks.get().saturating_add(1));
         Ok(())
