@@ -502,16 +502,19 @@ fn test_set_password_remove_and_allowlist() -> Result<(), Error> {
     );
     let (v, _) = exec(&b, &["account", "remove", "-a", "env", "--delete-password"])?;
     assert_eq!(at(&v, "/password_deleted"), false);
-    let (v, _) = exec(
+    // The last account can be removed as well.
+    let (v, code) = exec(
         &b,
         &["account", "remove", "-a", "work", "--delete-password"],
     )?;
-    assert!(
-        at(&v, "/error")
-            .as_str()
-            .is_some_and(|e| e.contains("accounts")),
-        "{v}"
+    assert_eq!(
+        (code, at(&v, "/password_deleted")),
+        (0, &serde_json::Value::from(true))
     );
+    assert!(Config::parse(&b.file_text())?.accounts.is_empty());
+    assert!(b.keychain.borrow().is_empty());
+    let (v, code) = exec(&b, &["accounts"])?;
+    assert_eq!(code, 0, "{v}");
     Ok(())
 }
 
@@ -1144,5 +1147,70 @@ fn gmail_accounts_do_not_store_their_own_sent_copy() -> Result<(), Error> {
     let account = config.account("g")?;
     assert!(!account.save_sent_copy);
     assert_eq!(account.sent_copy_folder(), None);
+    Ok(())
+}
+
+#[test]
+fn local_checks_come_before_any_login() -> Result<(), Error> {
+    let b = FakeBackend::new(plesk_net());
+    b.passwords.borrow_mut().push("pw".into());
+    let error = error_of(
+        &b,
+        &[
+            "account",
+            "add",
+            "--name",
+            "work\t",
+            "--address",
+            "alice@example.com",
+        ],
+    )?;
+    assert!(error.contains("control characters"), "{error}");
+    // Nothing was asked, probed or stored.
+    assert_eq!(b.passwords.borrow().len(), 1);
+    assert_eq!(b.smtp_checks.get(), 0);
+    assert!(b.keychain.borrow().is_empty());
+
+    // A broken configuration file is reported before any login, too.
+    let broken = FakeBackend::new(plesk_net());
+    broken
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("/cfg.toml"), "x = [".into());
+    broken.passwords.borrow_mut().push("pw".into());
+    let error = error_of(
+        &broken,
+        &[
+            "account",
+            "add",
+            "--name",
+            "n",
+            "--address",
+            "alice@example.com",
+        ],
+    )?;
+    assert!(error.contains("config"), "{error}");
+    assert_eq!(broken.passwords.borrow().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn hosts_named_on_the_command_line_need_no_confirmation() -> Result<(), Error> {
+    // SRV points IMAP to a provider outside the domain; the user names that
+    // very host, without a terminal.
+    let b = FakeBackend {
+        terminal: false,
+        ..FakeBackend::new(srv_net("mail.provider.net", "smtp.example.com"))
+    };
+    b.stdin.borrow_mut().push_str("pw");
+    let (v, code) = exec(
+        &b,
+        &[
+            ADD_ATTACKER,
+            &["--imap-host", "mail.provider.net", "--password-stdin"],
+        ]
+        .concat(),
+    )?;
+    assert_eq!(code, 0, "{v}");
     Ok(())
 }

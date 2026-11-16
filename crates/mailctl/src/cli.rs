@@ -557,6 +557,7 @@ fn list(
     let session = Session::open(cli, backend, &location.account)?;
     let before = request.before.map(Uid::new).transpose()?;
     let mut store = session.store()?;
+    let folder = MailboxName::new(&location.folder)?;
     let folders: Vec<MailboxName> = if request.all_folders {
         service::folders(store.as_mut())?
             .into_iter()
@@ -564,7 +565,7 @@ fn list(
             .map(|f| f.name)
             .collect()
     } else {
-        vec![MailboxName::new(&location.folder)?]
+        vec![folder.clone()]
     };
     if request.ndjson {
         for folder in &folders {
@@ -588,16 +589,10 @@ fn list(
         }
         return emit(out, &listed);
     }
-    let mut mails = Vec::new();
-    for folder in &folders {
-        mails.extend(service::list(
-            store.as_mut(),
-            folder,
-            request.limit,
-            before,
-        )?);
-    }
-    emit(out, &mails)
+    emit(
+        out,
+        &service::list(store.as_mut(), &folder, request.limit, before)?,
+    )
 }
 
 fn accounts(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write) -> Result<u8, Error> {

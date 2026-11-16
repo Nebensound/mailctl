@@ -52,11 +52,7 @@ impl Backend for SystemBackend {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn read_plan(&self, path: &Path) -> Result<String, Error> {
         if path.as_os_str() == "-" {
-            let mut text = String::new();
-            std::io::stdin()
-                .read_to_string(&mut text)
-                .map_err(|e| Error::InvalidInput(format!("stdin: {e}")))?;
-            return Ok(text);
+            return self.read_stdin();
         }
         std::fs::read_to_string(path)
             .map_err(|e| Error::InvalidInput(format!("{}: {e}", path.display())))

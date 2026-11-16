@@ -18,7 +18,8 @@ pub struct Config {
     /// Recipients that `forward` may send to. Anything else is refused.
     #[serde(default)]
     pub forward_allowlist: Vec<EmailAddress>,
-    /// Configured accounts.
+    /// Configured accounts; may be empty, e.g. before the first `account add`.
+    #[serde(default)]
     pub accounts: Vec<AccountConfig>,
 }
 
@@ -161,11 +162,29 @@ impl AccountConfig {
     }
 }
 
+/// Checks an account name: not blank and without control characters, since it
+/// is also the keychain item's account and is typed on the command line.
+///
+/// # Errors
+/// [`Error::Config`] naming the problem.
+pub fn validate_account_name(name: &str) -> Result<(), Error> {
+    if name.trim().is_empty() {
+        return Err(Error::Config("account name must not be empty".into()));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(Error::Config(format!(
+            "account name {name:?} contains control characters"
+        )));
+    }
+    Ok(())
+}
+
 /// Source of an account password.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PasswordSource {
-    /// macOS keychain item with this service name; the account is the login name.
+    /// macOS keychain item with this service name; the item's account is the
+    /// mailctl account name (see [`AccountConfig::keychain_account`]).
     Keychain(String),
     /// Environment variable with this name (for cloud agents and CI).
     Env(String),
@@ -293,18 +312,14 @@ impl Config {
     /// Parses the TOML configuration and checks it for consistency.
     ///
     /// # Errors
-    /// Returns [`Error::Config`] for syntax errors, empty or duplicate account names
-    /// and an empty account list.
+    /// Returns [`Error::Config`] for syntax errors and invalid or duplicate
+    /// account names. No accounts at all is valid (a fresh setup, or after
+    /// removing the last one); commands that need one report it as unknown.
     pub fn parse(text: &str) -> Result<Self, Error> {
         let config: Self = toml::from_str(text).map_err(|e| Error::Config(e.to_string()))?;
-        if config.accounts.is_empty() {
-            return Err(Error::Config("no accounts configured".into()));
-        }
         let mut seen = std::collections::HashSet::new();
         for account in &config.accounts {
-            if account.name.trim().is_empty() {
-                return Err(Error::Config("account name must not be empty".into()));
-            }
+            validate_account_name(&account.name)?;
             if !seen.insert(account.name.as_str()) {
                 return Err(Error::Config(format!(
                     "duplicate account: {}",

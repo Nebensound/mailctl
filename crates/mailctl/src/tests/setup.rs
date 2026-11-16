@@ -3,8 +3,8 @@
 use super::*;
 use crate::store::FolderInfo;
 
-fn account(name: &str) -> Result<NewAccount, Error> {
-    Ok(NewAccount {
+fn account(name: &str) -> Result<AccountConfig, Error> {
+    Ok(AccountConfig {
         name: name.to_owned(),
         user: "alice".to_owned(),
         address: EmailAddress::parse("alice@example.com")?,
@@ -12,7 +12,7 @@ fn account(name: &str) -> Result<NewAccount, Error> {
         imap_port: 993,
         smtp_host: "mail.example.net".to_owned(),
         smtp_port: 587,
-        smtp_security: Security::StartTls,
+        smtp_security: Some(crate::types::Security::StartTls),
         smtp_user: None,
         sent_folder: MailboxName::new("INBOX.Sent")?,
         save_sent_copy: true,
@@ -25,6 +25,18 @@ fn account(name: &str) -> Result<NewAccount, Error> {
 fn adds_accounts_and_keeps_comments() -> Result<(), Error> {
     let first = add_account("", &account("work")?)?;
     let config = Config::parse(&first)?;
+    // Every field is written: the account reads back unchanged.
+    assert_eq!(config.account("work")?, &account("work")?);
+    let mut other = account("other")?;
+    other.smtp_user = Some("relay".into());
+    other.smtp_security = None;
+    other.save_sent_copy = false;
+    other.password = PasswordSource::Env("PW".into());
+    other.access = Access::Read;
+    assert_eq!(
+        Config::parse(&add_account("", &other)?)?.account("other")?,
+        &other
+    );
     assert_eq!(config.account("work")?.imap_port, 993);
     let commented = format!("# my mail accounts\n{first}");
     let mut second = account("home")?;
@@ -78,7 +90,27 @@ fn removes_accounts() -> Result<(), Error> {
         remove_account(&left, "zzz"),
         Err(Error::UnknownAccount("zzz".into()))
     );
-    assert!(matches!(remove_account(&left, "b"), Err(Error::Config(m)) if m.contains("accounts")));
+    // The last account can go too; the allowlist stays.
+    let with_list = allowlist_add(&left, &EmailAddress::parse("x@example.de")?)?;
+    let none = remove_account(&with_list, "b")?;
+    let config = Config::parse(&none)?;
+    assert!(config.accounts.is_empty());
+    assert_eq!(config.forward_allowlist.len(), 1);
+    // And an account can be added again afterwards.
+    assert!(
+        Config::parse(&add_account(&none, &account("c")?)?)?
+            .account("c")
+            .is_ok()
+    );
+    Ok(())
+}
+
+#[test]
+fn the_allowlist_can_come_before_any_account() -> Result<(), Error> {
+    let text = allowlist_add("", &EmailAddress::parse("accounting@example.com")?)?;
+    let config = Config::parse(&text)?;
+    assert!(config.accounts.is_empty());
+    assert!(config.forward_allowed(&EmailAddress::parse("accounting@example.com")?));
     Ok(())
 }
 

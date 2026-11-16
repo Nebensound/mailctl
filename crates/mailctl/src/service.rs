@@ -118,16 +118,22 @@ fn verify(store: &mut dyn MailStore, uid: Uid, expect: &Expect) -> Result<MailSu
     if matches {
         Ok(summary)
     } else {
+        // `found` is the same kind of value as `expected`, so a wrong UID and
+        // a stale reference can be told apart without another lookup.
+        let (expected, found) = match expect {
+            Expect::MessageId(id) => (
+                id.to_string(),
+                summary
+                    .message_id
+                    .as_ref()
+                    .map_or_else(|| "no Message-ID".to_owned(), ToString::to_string),
+            ),
+            Expect::Ref(r) => (r.to_string(), summary.mail_ref.to_string()),
+        };
         Err(Error::MessageIdMismatch {
             uid: uid.get(),
-            expected: match expect {
-                Expect::MessageId(id) => id.to_string(),
-                Expect::Ref(r) => r.to_string(),
-            },
-            found: summary
-                .message_id
-                .as_ref()
-                .map_or_else(|| summary.mail_ref.to_string(), ToString::to_string),
+            expected,
+            found,
         })
     }
 }
@@ -248,7 +254,7 @@ pub fn move_mail(
             store.add_flags(uid, &[FLAG_SEEN])?;
         }
         store.move_to(uid, target)?;
-        store.select(folder)?;
+        // The source folder is still selected after MOVE.
         if !store.headers(&[uid])?.is_empty() {
             return Err(Error::NotConfirmed(format!("UID {uid} still in {folder}")));
         }

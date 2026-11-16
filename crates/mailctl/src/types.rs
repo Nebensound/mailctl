@@ -54,8 +54,21 @@ impl Security {
 
 /// An IMAP UID within one mailbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "u32", into = "u32")]
 pub struct Uid(u32);
+
+impl TryFrom<u32> for Uid {
+    type Error = Error;
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<Uid> for u32 {
+    fn from(value: Uid) -> Self {
+        value.0
+    }
+}
 
 impl Uid {
     /// Creates a UID; IMAP UIDs are never zero.
@@ -262,8 +275,21 @@ impl fmt::Display for EmailAddress {
 /// The same mail always gets the same reference, in every run and every
 /// account, so people and agents can talk about it without a counter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String", into = "String")]
 pub struct MailRef(String);
+
+impl TryFrom<String> for MailRef {
+    type Error = Error;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<MailRef> for String {
+    fn from(value: MailRef) -> Self {
+        value.0
+    }
+}
 
 /// Number of hex characters in a [`MailRef`] (40 bits).
 const MAIL_REF_LEN: usize = 10;

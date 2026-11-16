@@ -8,12 +8,14 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::cli::{Backend, Cli, emit};
-use crate::config::{Access, AccountConfig, Config, PasswordSource, Secret, resolve_password};
+use crate::config::{
+    Access, AccountConfig, Config, PasswordSource, Secret, resolve_password, validate_account_name,
+};
 use crate::discover::{self, Discovery, Endpoint, Security, ServerSettings, smtp_endpoint};
 use crate::error::Error;
 use crate::guard::GuardedStore;
 use crate::service;
-use crate::setup::{self, NewAccount};
+use crate::setup;
 use crate::types::{EmailAddress, IMAPS_PORT as IMAPS, MailboxName, SUBMISSION_PORT as SUBMISSION};
 
 /// Default keychain service name.
@@ -434,10 +436,13 @@ fn resolve_servers(
             unconfirmed_hosts,
         }) => {
             let settings = apply_overrides(settings, args);
-            // Hosts the user gave on the command line need no confirmation.
+            // Only discovered hosts that are still used need confirmation; a
+            // host the user named on the command line does not.
+            let given = [args.imap_host.as_ref(), args.smtp_host.as_ref()];
             let unconfirmed_hosts = unconfirmed_hosts
                 .into_iter()
                 .filter(|h| *h == settings.imap.host || *h == settings.smtp.host)
+                .filter(|h| !given.contains(&Some(h)))
                 .collect();
             Ok(Resolved {
                 settings,
@@ -515,10 +520,11 @@ fn verify_new_account(
 fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) -> Result<u8, Error> {
     let address = EmailAddress::parse(&args.address)?;
     let password = parse_password_source(&args.password_source)?;
+    // Everything that can be checked locally is checked before any network,
+    // password or keychain step.
+    validate_account_name(&args.name)?;
     let (path, text) = config_text(cli, backend)?;
-    if let Ok(existing) = Config::parse(&text)
-        && existing.account(&args.name).is_ok()
-    {
+    if Config::parse(&text)?.account(&args.name).is_ok() {
         return Err(Error::Config(format!(
             "account {} already exists",
             args.name
@@ -550,24 +556,9 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
         access: Access::Read,
     };
     let (secret, sent_folder) = verify_new_account(backend, args, &password, &mut probe)?;
-    let new_text = setup::add_account(
-        &text,
-        &NewAccount {
-            name: args.name.clone(),
-            user: probe.user.clone(),
-            address,
-            imap_host: probe.imap_host.clone(),
-            imap_port: probe.imap_port,
-            smtp_host: probe.smtp_host.clone(),
-            smtp_port: probe.smtp_port,
-            smtp_security: settings.smtp.security,
-            smtp_user: args.smtp_user.clone(),
-            sent_folder: sent_folder.clone(),
-            save_sent_copy: probe.save_sent_copy,
-            password: password.clone(),
-            access: args.access,
-        },
-    )?;
+    probe.sent_folder = sent_folder.clone();
+    probe.access = args.access;
+    let new_text = setup::add_account(&text, &probe)?;
     let mut password_stored = false;
     if !args.dry_run {
         // Config first: storing the password with `-U` would overwrite an item

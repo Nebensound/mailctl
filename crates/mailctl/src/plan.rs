@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{Access, AccountConfig, Config};
 use crate::error::Error;
 use crate::service::{self, ActionReport, ForwardJob};
-use crate::store::{MailSender, MailStore};
+use crate::store::{FolderInfo, MailSender, MailStore, RawHeader, RawMessage};
 use crate::types::{EmailAddress, Expect, MailboxName, MessageId, Uid};
 
 /// A batch of changes for one account.
@@ -134,12 +134,34 @@ pub fn run(
     sender: &mut dyn MailSender,
     new_message_id: &mut dyn FnMut() -> Result<MessageId, Error>,
 ) -> PlanResult {
+    let mut store = PlannedFolders {
+        inner: store,
+        planned: Vec::new(),
+    };
     let results: Vec<OpResult> = plan
         .ops
         .iter()
         .enumerate()
         .map(|(index, op)| {
-            let outcome = run_op(plan, op, account, config, store, sender, new_message_id);
+            let outcome = run_op(
+                plan,
+                op,
+                account,
+                config,
+                &mut store,
+                sender,
+                new_message_id,
+            );
+            // A dry run creates nothing, but later operations of the same plan
+            // may use the folder (`create_folder X`, then `move` into X).
+            if let (true, Ok(_), PlanOp::CreateFolder { name }) = (plan.dry_run, &outcome, op) {
+                store.planned.push(FolderInfo {
+                    name: name.clone(),
+                    delimiter: None,
+                    selectable: true,
+                    special_use: None,
+                });
+            }
             match outcome {
                 Ok(report) => OpResult {
                     index,
@@ -226,6 +248,74 @@ fn run_op(
             )
         }
         PlanOp::CreateFolder { name } => service::create_folder(store, name, plan.dry_run),
+    }
+}
+
+/// The store as a plan sees it: folders created earlier in a dry run are
+/// listed as if they existed.
+struct PlannedFolders<'a> {
+    inner: &'a mut dyn MailStore,
+    planned: Vec<FolderInfo>,
+}
+
+impl MailStore for PlannedFolders<'_> {
+    fn folders(&mut self) -> Result<Vec<FolderInfo>, Error> {
+        let mut folders = self.inner.folders()?;
+        folders.extend(self.planned.iter().cloned());
+        Ok(folders)
+    }
+
+    fn select(&mut self, folder: &MailboxName) -> Result<(), Error> {
+        self.inner.select(folder)
+    }
+
+    fn select_read_only(&mut self, folder: &MailboxName) -> Result<(), Error> {
+        self.inner.select_read_only(folder)
+    }
+
+    fn keywords_allowed(&mut self) -> Result<bool, Error> {
+        self.inner.keywords_allowed()
+    }
+
+    fn uids(&mut self) -> Result<Vec<Uid>, Error> {
+        self.inner.uids()
+    }
+
+    fn headers(&mut self, uids: &[Uid]) -> Result<Vec<RawHeader>, Error> {
+        self.inner.headers(uids)
+    }
+
+    fn message(&mut self, uid: Uid) -> Result<Option<RawMessage>, Error> {
+        self.inner.message(uid)
+    }
+
+    fn add_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error> {
+        self.inner.add_flags(uid, flags)
+    }
+
+    fn supports_move(&mut self) -> Result<bool, Error> {
+        self.inner.supports_move()
+    }
+
+    fn move_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
+        self.inner.move_to(uid, target)
+    }
+
+    fn find_message_id(&mut self, id: &MessageId) -> Result<Vec<Uid>, Error> {
+        self.inner.find_message_id(id)
+    }
+
+    fn create_folder(&mut self, name: &MailboxName) -> Result<(), Error> {
+        self.inner.create_folder(name)
+    }
+
+    fn append(
+        &mut self,
+        folder: &MailboxName,
+        message: &[u8],
+        flags: &[&str],
+    ) -> Result<(), Error> {
+        self.inner.append(folder, message, flags)
     }
 }
 

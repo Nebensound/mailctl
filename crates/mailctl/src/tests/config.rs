@@ -65,7 +65,7 @@ fn parses_sample_with_defaults() -> Result<(), Error> {
 fn rejects_bad_configs() {
     assert!(matches!(Config::parse("nonsense ="), Err(Error::Config(_))));
     assert!(matches!(
-        Config::parse("accounts = []"),
+        Config::parse("accounts = 1"),
         Err(Error::Config(_))
     ));
     let dup = format!(
@@ -79,6 +79,17 @@ fn rejects_bad_configs() {
     assert!(matches!(Config::parse(&dup), Err(Error::Config(m)) if m.contains("duplicate")));
     let empty = SAMPLE.replace("name = \"icloud\"", "name = \" \"");
     assert!(matches!(Config::parse(&empty), Err(Error::Config(m)) if m.contains("empty")));
+    let tab = SAMPLE.replace("name = \"icloud\"", "name = \"icloud\\t\"");
+    assert!(matches!(Config::parse(&tab), Err(Error::Config(m)) if m.contains("control")));
+}
+
+#[test]
+fn no_accounts_is_a_valid_configuration() -> Result<(), Error> {
+    let config = Config::parse("forward_allowlist = [\"a@b.de\"]\n")?;
+    assert!(config.accounts.is_empty());
+    assert_eq!(config.account("x"), Err(Error::UnknownAccount("x".into())));
+    assert!(Config::parse("")?.accounts.is_empty());
+    Ok(())
 }
 
 #[test]

@@ -99,3 +99,19 @@ fn only_port_465_uses_implicit_tls_for_smtp() {
     assert!(!smtp_implicit_tls(SUBMISSION_PORT));
     assert!(!smtp_implicit_tls(25));
 }
+
+#[test]
+fn deserialization_goes_through_the_checks() {
+    assert!(serde_json::from_str::<Uid>("0").is_err());
+    assert_eq!(serde_json::from_str::<Uid>("7").map(Uid::get).ok(), Some(7));
+    assert!(serde_json::from_str::<MailRef>("\"not-a-ref\"").is_err());
+    let good = serde_json::from_str::<MailRef>("\"0123456789\"");
+    assert_eq!(
+        good.map(|r| r.as_str().to_owned()).ok().as_deref(),
+        Some("0123456789")
+    );
+    assert_eq!(
+        serde_json::to_string(&Uid::new(7).ok()).ok().as_deref(),
+        Some("7")
+    );
+}

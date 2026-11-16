@@ -5,40 +5,10 @@
 
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, value};
 
-use crate::config::{Access, Config, PasswordSource};
+use crate::config::Access;
+use crate::config::{AccountConfig, Config, PasswordSource};
 use crate::error::Error;
-use crate::types::{EmailAddress, MailboxName, Security};
-
-/// A new account entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewAccount {
-    /// Short name.
-    pub name: String,
-    /// Login name.
-    pub user: String,
-    /// Sender address.
-    pub address: EmailAddress,
-    /// IMAP host (implicit TLS).
-    pub imap_host: String,
-    /// IMAP port.
-    pub imap_port: u16,
-    /// SMTP host.
-    pub smtp_host: String,
-    /// SMTP port.
-    pub smtp_port: u16,
-    /// SMTP security.
-    pub smtp_security: Security,
-    /// SMTP login, if different from `user`.
-    pub smtp_user: Option<String>,
-    /// Sent folder.
-    pub sent_folder: MailboxName,
-    /// Whether mailctl stores copies of forwards itself.
-    pub save_sent_copy: bool,
-    /// Password source.
-    pub password: PasswordSource,
-    /// Access level.
-    pub access: Access,
-}
+use crate::types::{EmailAddress, MailboxName};
 
 fn parse_doc(text: &str) -> Result<DocumentMut, Error> {
     text.parse::<DocumentMut>()
@@ -64,12 +34,13 @@ fn port_value(port: u16) -> Item {
     value(i64::from(port))
 }
 
-/// Adds an account to the configuration text (which may be empty).
+/// Adds an account to the configuration text (which may be empty). Every
+/// field of `account` is written, so it parses back as the same value.
 ///
 /// # Errors
 /// [`Error::Config`] if the text is not valid TOML, the name is taken, or the
 /// result would not be a valid configuration.
-pub fn add_account(text: &str, account: &NewAccount) -> Result<String, Error> {
+pub fn add_account(text: &str, account: &AccountConfig) -> Result<String, Error> {
     let mut doc = parse_doc(text)?;
     let accounts = accounts_mut(&mut doc)?;
     let taken = accounts
@@ -89,7 +60,9 @@ pub fn add_account(text: &str, account: &NewAccount) -> Result<String, Error> {
     table.insert("imap_port", port_value(account.imap_port));
     table.insert("smtp_host", value(account.smtp_host.as_str()));
     table.insert("smtp_port", port_value(account.smtp_port));
-    table.insert("smtp_security", value(account.smtp_security.as_str()));
+    if let Some(security) = account.smtp_security {
+        table.insert("smtp_security", value(security.as_str()));
+    }
     if let Some(user) = &account.smtp_user {
         table.insert("smtp_user", value(user.as_str()));
     }
@@ -111,8 +84,8 @@ pub fn add_account(text: &str, account: &NewAccount) -> Result<String, Error> {
 /// Removes an account from the configuration text.
 ///
 /// # Errors
-/// [`Error::UnknownAccount`] if it does not exist; [`Error::Config`] if the
-/// result would be invalid, for example because it was the last account.
+/// [`Error::UnknownAccount`] if it does not exist; [`Error::Config`] for
+/// invalid TOML. Removing the last account leaves a valid, empty setup.
 pub fn remove_account(text: &str, name: &str) -> Result<String, Error> {
     let mut doc = parse_doc(text)?;
     let accounts = accounts_mut(&mut doc)?;

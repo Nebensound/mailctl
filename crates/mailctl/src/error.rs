@@ -29,14 +29,15 @@ pub enum Error {
     /// No mail with this UID exists in the selected folder.
     #[error("no mail with UID {0} in this folder")]
     NotFound(u32),
-    /// The mail at the UID has a different `Message-ID` than expected.
+    /// The mail at the UID is not the expected one.
     #[error("Message-ID mismatch at UID {uid}: expected {expected}, found {found}")]
     MessageIdMismatch {
         /// The UID that was checked.
         uid: u32,
-        /// The expected `Message-ID`.
+        /// The expected `Message-ID` or mail reference.
         expected: String,
-        /// The `Message-ID` found on the server.
+        /// The same kind of value for the mail found on the server: its
+        /// `Message-ID` (or "no Message-ID"), or its mail reference.
         found: String,
     },
     /// The forward recipient is not on the allow list.

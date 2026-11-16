@@ -449,11 +449,11 @@ fn every_server_failure_aborts_the_operation() -> Result<(), Error> {
     ];
     // list: select, uids, headers; show: select, headers, message; mark_read:
     // select, headers, flag, headers; move: folders, capability, select,
-    // headers, (flag,) move, select, uids, and with a Message-ID select,
-    // search, headers; create: folders, create, folders; forward: select,
+    // headers, (flag,) move, headers of the UID, and with a Message-ID
+    // select, search, headers; create: folders, create, folders; forward: select,
     // headers, keywords, message, folders, flag, headers, append, select,
     // search, headers.
-    assert_eq!(calls, [3, 3, 4, 11, 7, 3, 11]);
+    assert_eq!(calls, [3, 3, 4, 10, 6, 3, 11]);
     Ok(())
 }
 
@@ -709,5 +709,40 @@ fn reading_examines_instead_of_selecting() -> Result<(), Error> {
     store.read_only = false;
     show(&mut store, &inbox, uid(2)?, None, 10)?;
     assert!(store.read_only, "show must not open the folder read-write");
+    Ok(())
+}
+
+#[test]
+fn mismatches_report_the_same_kind_of_value() -> Result<(), Error> {
+    let inbox = folder("INBOX")?;
+    let mut store = FakeStore::with_inbox(vec![
+        mail(2, "a@x", "Invoice", &[]),
+        FakeStore::raw_mail(3, b"From: z@x.de\r\nSubject: s\r\n\r\nx".to_vec(), &[]),
+    ]);
+    let listed = list(&mut store, &inbox, 10, None)?;
+    let ref_of = |n: u32| {
+        listed
+            .iter()
+            .find(|m| m.uid.get() == n)
+            .map(|m| m.mail_ref.to_string())
+            .unwrap_or_default()
+    };
+    let stale = Expect::parse("0123456789")?;
+    assert_eq!(
+        mark_read(&mut store, &inbox, uid(2)?, &stale, true),
+        Err(Error::MessageIdMismatch {
+            uid: 2,
+            expected: "0123456789".into(),
+            found: ref_of(2),
+        })
+    );
+    assert_eq!(
+        mark_read(&mut store, &inbox, uid(3)?, &expect("m2@test")?, true),
+        Err(Error::MessageIdMismatch {
+            uid: 3,
+            expected: "m2@test".into(),
+            found: "no Message-ID".into(),
+        })
+    );
     Ok(())
 }
