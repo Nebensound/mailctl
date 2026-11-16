@@ -92,15 +92,16 @@ Subject: {subject}
     }
 
     // Sender and recipient are always set, so assembling cannot fail in
-    // practice; the error is still mapped instead of unwrapped.
+    // practice; it is still checked instead of unwrapped.
     Message::builder()
         .from(mailbox(request.from)?)
         .to(mailbox(request.to)?)
         .subject(subject_for(subject))
         .message_id(Some(format!("<{}>", request.message_id)))
         .multipart(parts)
+        .ok()
         .map(|message| message.formatted())
-        .map_err(invalid("cannot build forward".to_owned()))
+        .ok_or(Error::InvalidInput("cannot build forward".into()))
 }
 
 #[cfg(test)]

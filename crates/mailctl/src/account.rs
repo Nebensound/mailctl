@@ -137,8 +137,7 @@ pub enum AllowlistCommand {
 }
 
 fn emit<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<u8, Error> {
-    crate::cli::write_json(out, value)?;
-    Ok(0)
+    crate::cli::write_json(out, value).map(|()| 0)
 }
 
 /// Parses `keychain`, `keychain:<service>` or `env:<VARIABLE>`.
@@ -214,7 +213,7 @@ pub fn run_account(
             password_stdin,
         } => set_password(cli, backend, out, account, *password_stdin),
         AccountCommand::SetAccess { account, access } => {
-            let (path, text, _) = load(cli, backend, account)?;
+            let (path, text) = config_text(cli, backend)?;
             backend.write_file(&path, &setup::set_access(&text, account, *access)?)?;
             emit(
                 out,
@@ -396,8 +395,21 @@ fn resolve_servers(
     args: &AddArgs,
     address: &EmailAddress,
 ) -> Result<Resolved, Error> {
-    if args.imap_host.is_some() && args.smtp_host.is_some() {
-        return manual(backend, args, address, "servers given on the command line");
+    // Both servers given: nothing to discover or ask; ports and login default.
+    if let (Some(imap_host), Some(smtp_host)) = (&args.imap_host, &args.smtp_host) {
+        return Ok(Resolved {
+            settings: ServerSettings {
+                imap: Endpoint {
+                    host: imap_host.clone(),
+                    port: args.imap_port.unwrap_or(IMAPS),
+                    security: Security::Tls,
+                },
+                smtp: smtp_endpoint(smtp_host, args.smtp_port.unwrap_or(SUBMISSION)),
+                username: args.user.clone().unwrap_or_else(|| address.to_string()),
+            },
+            source: "command line".to_owned(),
+            trace: Vec::new(),
+        });
     }
     match discover::discover(address, backend.net().as_mut()) {
         Ok(Discovery {
@@ -570,10 +582,11 @@ fn load(
     cli: &Cli,
     backend: &dyn Backend,
     name: &str,
-) -> Result<(PathBuf, String, AccountConfig), Error> {
+) -> Result<(PathBuf, String, Config, AccountConfig), Error> {
     let (path, text) = config_text(cli, backend)?;
-    let account = Config::parse(&text)?.account(name)?.clone();
-    Ok((path, text, account))
+    let config = Config::parse(&text)?;
+    let account = config.account(name)?.clone();
+    Ok((path, text, config, account))
 }
 
 fn test(
@@ -583,7 +596,7 @@ fn test(
     name: &str,
     smtp: bool,
 ) -> Result<u8, Error> {
-    let (_, _, account) = load(cli, backend, name)?;
+    let (_, _, _, account) = load(cli, backend, name)?;
     let secret = resolve_password(&account, backend.secrets())?;
     let folders = service::folders(&mut read_only(backend, &account, &secret)?)?;
     let sent_folder_exists = folders.iter().any(|f| f.name == account.sent_folder);
@@ -629,7 +642,7 @@ fn set_password(
     name: &str,
     from_stdin: bool,
 ) -> Result<u8, Error> {
-    let (_, _, account) = load(cli, backend, name)?;
+    let (_, _, _, account) = load(cli, backend, name)?;
     let PasswordSource::Keychain(service) = &account.password else {
         return Err(Error::InvalidInput(format!(
             "account {name} reads its password from the environment; change the variable instead"
@@ -661,13 +674,14 @@ fn remove(
     name: &str,
     delete_password: bool,
 ) -> Result<u8, Error> {
-    let (path, text, account) = load(cli, backend, name)?;
+    let (path, text, config, account) = load(cli, backend, name)?;
     let new_text = setup::remove_account(&text, name)?;
     // Another account may log in with the same keychain item; keep it then.
-    let shared = Config::parse(&new_text)?
-        .accounts
-        .iter()
-        .any(|other| other.password == account.password && other.user == account.user);
+    let shared = config.accounts.iter().any(|other| {
+        other.name != account.name
+            && other.password == account.password
+            && other.user == account.user
+    });
     let mut password_deleted = false;
     if let (true, false, PasswordSource::Keychain(service)) =
         (delete_password, shared, &account.password)

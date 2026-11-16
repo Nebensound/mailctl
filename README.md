@@ -136,7 +136,9 @@ of everything that was tried.
 If nothing usable is found, `account add` falls back to manual entry: in a
 terminal it asks for the missing values; without a terminal it fails with the
 options to pass (`--imap-host`, `--smtp-host`, `--imap-port`, `--smtp-port`,
-`--user`). Values given on the command line always override discovery.
+`--user`). Values given on the command line always override discovery; with
+both `--imap-host` and `--smtp-host` nothing is discovered or asked, and the
+ports default to 993 and 587 and the login to the address.
 
 Other account commands: `account test -a NAME [--smtp]`,
 `account set-access -a NAME read|flag|organize|send`,

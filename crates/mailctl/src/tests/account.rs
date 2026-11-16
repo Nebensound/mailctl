@@ -322,7 +322,7 @@ fn manual_flags_and_no_verify() -> Result<(), Error> {
     assert_eq!(
         (at(&v, "/source"), at(&v, "/verified")),
         (
-            &serde_json::Value::from("manual"),
+            &serde_json::Value::from("command line"),
             &serde_json::Value::from(false)
         )
     );
@@ -723,5 +723,203 @@ fn remove_deletes_an_unshared_keychain_item() -> Result<(), Error> {
     );
     let keys: Vec<(String, String)> = b.keychain.borrow().keys().cloned().collect();
     assert_eq!(keys, vec![("mailctl".to_owned(), "alice".to_owned())]);
+    Ok(())
+}
+
+/// Runs `args` and returns the error text; the command must fail.
+fn error_of(b: &FakeBackend, args: &[&str]) -> Result<String, Error> {
+    let (v, code) = exec(b, args)?;
+    assert_eq!(code, 2, "{args:?}: {v}");
+    Ok(at(&v, "/error").as_str().unwrap_or_default().to_owned())
+}
+
+#[test]
+fn refuses_bad_input_and_broken_configuration() -> Result<(), Error> {
+    let b = configured()?;
+    let before = b.file_text();
+    let add = [
+        "account",
+        "add",
+        "--name",
+        "n",
+        "--address",
+        "alice@example.com",
+    ];
+    let cases: &[(&[&str], &str)] = &[
+        (&["account", "test", "-a", "nope"], "unknown account"),
+        (
+            &["account", "set-access", "-a", "nope", "read"],
+            "unknown account",
+        ),
+        (
+            &[&add[..], &["--password-source", "plain"]].concat(),
+            "password source",
+        ),
+        (
+            &[&add[..], &["--sent-folder", ""]].concat(),
+            "invalid mailbox name",
+        ),
+    ];
+    for (args, expected) in cases {
+        let error = error_of(&b, args)?;
+        assert!(error.contains(expected), "{args:?}: {error}");
+    }
+    assert_eq!(b.file_text(), before);
+
+    let nothing = FakeBackend::new(FakeNet::default());
+    let error = error_of(&nothing, &["account", "discover", "alice@example.com"])?;
+    assert!(error.contains("no IMAP host"), "{error}");
+
+    let broken = FakeBackend::new(plesk_net());
+    broken
+        .files
+        .borrow_mut()
+        .insert(PathBuf::from("/cfg.toml"), "x = [".into());
+    for args in [
+        &["account", "test", "-a", "work"][..],
+        &["allowlist", "add", "x@example.de"],
+        &[
+            "account",
+            "add",
+            "--name",
+            "n",
+            "--address",
+            "a@b.de",
+            "--imap-host",
+            "i",
+            "--smtp-host",
+            "s",
+            "--no-verify",
+            "--sent-folder",
+            "Sent",
+            "--password-source",
+            "env:PW",
+        ],
+    ] {
+        let error = error_of(&broken, args)?;
+        assert!(error.contains("config"), "{args:?}: {error}");
+    }
+    assert_eq!(broken.file_text(), "x = [");
+    Ok(())
+}
+
+#[test]
+fn missing_passwords_are_reported() -> Result<(), Error> {
+    let headless = FakeBackend {
+        terminal: false,
+        ..FakeBackend::new(FakeNet::default())
+    };
+    let error = error_of(
+        &headless,
+        &[
+            "account",
+            "add",
+            "--name",
+            "n",
+            "--address",
+            "a@b.de",
+            "--imap-host",
+            "i",
+            "--smtp-host",
+            "s",
+            "--no-verify",
+            "--sent-folder",
+            "Sent",
+        ],
+    )?;
+    assert!(error.contains("--password-stdin"), "{error}");
+    assert!(headless.file_text().is_empty());
+
+    let b = FakeBackend::new(FakeNet::default());
+    b.stdin.borrow_mut().push_str("pw\n");
+    exec(
+        &b,
+        &[
+            "account",
+            "add",
+            "--name",
+            "env",
+            "--address",
+            "a@b.de",
+            "--imap-host",
+            "i",
+            "--smtp-host",
+            "s",
+            "--no-verify",
+            "--sent-folder",
+            "Sent",
+            "--password-source",
+            "env:PW",
+        ],
+    )?;
+    b.env_password.replace(None);
+    let error = error_of(&b, &["account", "test", "-a", "env"])?;
+    assert!(error.contains("no password"), "{error}");
+    Ok(())
+}
+
+#[test]
+fn manual_fallback_asks_only_for_missing_values() -> Result<(), Error> {
+    // Only the IMAP host given: the rest is asked, with defaults.
+    let b = FakeBackend::new(FakeNet::default());
+    b.answers.borrow_mut().extend(vec![String::new(); 4]);
+    b.passwords.borrow_mut().push("pw".into());
+    let (v, code) = exec(
+        &b,
+        &[
+            "account",
+            "add",
+            "--name",
+            "a",
+            "--address",
+            "a@example.org",
+            "--imap-host",
+            "imap.example.org",
+        ],
+    )?;
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(at(&v, "/source"), "manual");
+    assert_eq!(at(&v, "/settings/smtp/host"), "imap.example.org");
+    assert_eq!(at(&v, "/settings/username"), "a@example.org");
+
+    // Everything but the IMAP host given: exactly one question.
+    let b = FakeBackend::new(FakeNet::default());
+    b.answers.borrow_mut().push("in.example.org".into());
+    b.passwords.borrow_mut().push("pw".into());
+    let (v, code) = exec(
+        &b,
+        &[
+            "account",
+            "add",
+            "--name",
+            "b",
+            "--address",
+            "a@example.org",
+            "--imap-port",
+            "1993",
+            "--smtp-host",
+            "out.example.org",
+            "--smtp-port",
+            "465",
+            "--user",
+            "login",
+        ],
+    )?;
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(
+        (
+            at(&v, "/settings/imap/host"),
+            at(&v, "/settings/imap/port"),
+            at(&v, "/settings/smtp/host"),
+            at(&v, "/settings/username"),
+        ),
+        (
+            &serde_json::Value::from("in.example.org"),
+            &serde_json::Value::from(1993),
+            &serde_json::Value::from("out.example.org"),
+            &serde_json::Value::from("login"),
+        )
+    );
+    assert!(b.answers.borrow().is_empty());
     Ok(())
 }

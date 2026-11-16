@@ -631,3 +631,21 @@ fn invalid_arguments_are_refused_before_connecting() -> Result<(), Error> {
     assert!(at(&v, "/error").is_string());
     Ok(())
 }
+
+#[test]
+fn broken_configuration_is_reported() -> Result<(), Error> {
+    let mut b = TestBackend::new();
+    b.config = Ok("x = [".into());
+    for args in [&["accounts"][..], &["folders", "-a", "test"]] {
+        let (v, code) = exec(&b, args)?;
+        assert_eq!(code, 2, "{args:?}");
+        assert!(
+            at(&v, "/error")
+                .as_str()
+                .is_some_and(|e| e.contains("config")),
+            "{args:?}: {v}"
+        );
+    }
+    assert_eq!(b.store.borrow().calls.get(), 0);
+    Ok(())
+}

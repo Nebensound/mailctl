@@ -249,7 +249,11 @@ pub trait Backend {
     fn check_smtp(&self, account: &AccountConfig, secret: &Secret) -> Result<(), Error>;
 }
 
-fn output_error(e: impl std::fmt::Display) -> Error {
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "signature required by Result::map_err"
+)]
+fn output_error(e: serde_json::Error) -> Error {
     Error::InvalidInput(format!("output: {e}"))
 }
 
@@ -258,14 +262,16 @@ fn output_error(e: impl std::fmt::Display) -> Error {
 /// # Errors
 /// [`Error::InvalidInput`] if `out` fails.
 pub(crate) fn write_json<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<(), Error> {
-    serde_json::to_writer_pretty(&mut *out, value).map_err(output_error)?;
-    writeln!(out).map_err(output_error)
+    serde_json::to_writer_pretty(&mut *out, value)
+        .and_then(|()| writeln!(out).map_err(serde_json::Error::io))
+        .map_err(output_error)
 }
 
 /// Writes `value` as one line of JSON (for ndjson).
 fn write_json_line<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<(), Error> {
-    serde_json::to_writer(&mut *out, value).map_err(output_error)?;
-    writeln!(out).map_err(output_error)
+    serde_json::to_writer(&mut *out, value)
+        .and_then(|()| writeln!(out).map_err(serde_json::Error::io))
+        .map_err(output_error)
 }
 
 #[derive(Serialize)]
@@ -324,8 +330,7 @@ pub fn run(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write) -> u8 {
 }
 
 fn emit<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<u8, Error> {
-    write_json(out, value)?;
-    Ok(0)
+    write_json(out, value).map(|()| 0)
 }
 
 struct Session<'a> {
