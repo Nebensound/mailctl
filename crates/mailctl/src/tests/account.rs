@@ -1029,3 +1029,27 @@ fn multi_line_passwords_are_refused() -> Result<(), Error> {
     assert!(error.contains("control characters"), "{error}");
     Ok(())
 }
+
+#[test]
+fn failures_while_confirming_foreign_servers_are_reported() -> Result<(), Error> {
+    for n in 0..64 {
+        let mut b = FakeBackend::new(srv_net("imap.attacker.net", "smtp.attacker.net"));
+        b.answers.borrow_mut().push("y".into());
+        b.passwords.borrow_mut().push("pw".into());
+        b.fail_at = Some(n);
+        let (v, code) = exec(&b, ADD_ATTACKER)?;
+        if code == 0 {
+            assert!(
+                n >= 3,
+                "config path, config file and the question come first"
+            );
+            return Ok(());
+        }
+        assert!(at(&v, "/error").is_string(), "{n}: {v}");
+        if n <= 2 {
+            // Up to the question nothing has logged in anywhere.
+            assert_eq!(b.smtp_checks.get(), 0, "{n}");
+        }
+    }
+    Err(Error::Store("never succeeded".into()))
+}
