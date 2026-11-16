@@ -14,7 +14,9 @@ Binaries for macOS (Apple Silicon and Intel) and Linux (x86_64) are attached
 to each [GitHub release](https://github.com/Nebensound/mailctl/releases);
 unpack one and put `mailctl` on your `PATH`. The Linux binary is statically
 linked (musl, OpenSSL compiled in), so it needs no particular glibc or
-OpenSSL and runs in slim container images. With Rust installed:
+OpenSSL; TLS needs the system CA certificates (`ca-certificates` package, or
+`SSL_CERT_FILE`), which slim images such as `debian:*-slim` and `alpine` do
+not include by default. With Rust installed:
 
 ```sh
 cargo install mailctl --locked
