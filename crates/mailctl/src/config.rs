@@ -221,16 +221,6 @@ impl Secret {
         Ok(Self(value.to_owned()))
     }
 
-    /// Reads the output of `security find-generic-password -w`. `security`
-    /// prints passwords with non-ASCII bytes as hex digits, so a hex string
-    /// that decodes to UTF-8 with a non-ASCII character is decoded; any other
-    /// value is taken as it is.
-    #[must_use]
-    pub fn from_keychain_output(raw: &str) -> Self {
-        let value = raw.trim_end_matches('\n');
-        Self(decode_hex_password(value).unwrap_or_else(|| value.to_owned()))
-    }
-
     /// Exposes the password for login.
     #[must_use]
     pub fn expose(&self) -> &str {
@@ -267,28 +257,37 @@ pub fn keychain_store_command(
     ))
 }
 
-fn decode_hex_password(value: &str) -> Option<String> {
-    let hex = !value.is_empty()
-        && value.len().is_multiple_of(2)
-        && value.bytes().all(|b| b.is_ascii_hexdigit());
-    if !hex {
-        return None;
+/// The password from `security find-generic-password -g`, which prints it on
+/// standard error as `password: "text"`, or as `password: 0x<hex>  "..."` when
+/// it is not printable ASCII. Unlike `-w`, the two forms cannot be confused:
+/// a printable password that happens to look like hex stays as it is.
+///
+/// # Errors
+/// A reason, if there is no `password:` line or the hex is not UTF-8.
+pub fn keychain_password(security_stderr: &str) -> Result<String, String> {
+    let line = security_stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("password: "))
+        .ok_or("`security` printed no password")?;
+    if let Some(hex) = line.strip_prefix("0x") {
+        let digits = hex.split_whitespace().next().unwrap_or_default();
+        let bytes: Vec<u8> = digits
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| {
+                std::str::from_utf8(pair)
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok())
+            })
+            .collect::<Option<_>>()
+            .ok_or("`security` printed invalid hex")?;
+        return String::from_utf8(bytes).map_err(|_| "password is not UTF-8".to_owned());
     }
-    let bytes: Vec<u8> = value
-        .as_bytes()
-        .chunks_exact(2)
-        .filter_map(|pair| {
-            std::str::from_utf8(pair)
-                .ok()
-                .and_then(|h| u8::from_str_radix(h, 16).ok())
-        })
-        .collect();
-    // `security` switches to hex only for non-ASCII bytes; an all-ASCII
-    // result (`123456` → 0x12 0x34 0x56) was printed as it is.
-    if bytes.is_ascii() {
-        return None;
-    }
-    String::from_utf8(bytes).ok()
+    Ok(line
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(line)
+        .to_owned())
 }
 
 impl fmt::Debug for Secret {

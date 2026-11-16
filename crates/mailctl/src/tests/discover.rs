@@ -254,8 +254,12 @@ fn reports_trace_when_nothing_works() -> Result<(), Error> {
 
 #[test]
 fn helpers() {
-    assert_eq!(base_domain("mx01.mail.example.co."), "example.co");
-    assert_eq!(base_domain("localhost"), "localhost");
+    assert_eq!(
+        mx_domains("mx1.mailhost.co.uk."),
+        vec!["mailhost.co.uk".to_owned(), "co.uk".to_owned()]
+    );
+    assert_eq!(mx_domains("mx.example.net"), vec!["example.net".to_owned()]);
+    assert!(mx_domains("localhost").is_empty());
     assert_eq!(Security::for_smtp_port(465), Security::Tls);
 }
 
@@ -421,4 +425,44 @@ fn knows_servers_that_file_sent_mail_themselves() {
     assert!(server_files_sent_mail("smtp.gmail.com"));
     assert!(server_files_sent_mail("SMTP.Office365.com."));
     assert!(!server_files_sent_mail("smtp.mail.me.com"));
+}
+
+#[test]
+fn ispdb_lookup_by_mx_finds_providers_under_two_label_suffixes() -> Result<(), Error> {
+    let mut net = FakeNet {
+        ok: ok(&[("mail.example.net", 993), ("mail.example.net", 587)]),
+        ..FakeNet::default()
+    };
+    net.mx
+        .insert("example.com".into(), vec!["mx1.mailhost.co.uk".into()]);
+    net.pages.insert(
+        "https://autoconfig.thunderbird.net/v1.1/mailhost.co.uk".into(),
+        AUTOCONFIG.into(),
+    );
+    let found = discover(&ns()?, &mut net)?;
+    assert_eq!(found.source, "Mozilla ISPDB for MX domain mailhost.co.uk");
+
+    // Nothing for the longer candidate: the shorter one is tried as well.
+    let mut shorter = FakeNet {
+        ok: ok(&[("mail.example.net", 993), ("mail.example.net", 587)]),
+        ..FakeNet::default()
+    };
+    shorter
+        .mx
+        .insert("example.com".into(), vec!["mx1.eu.mailhost.net".into()]);
+    shorter.pages.insert(
+        "https://autoconfig.thunderbird.net/v1.1/mailhost.net".into(),
+        AUTOCONFIG.into(),
+    );
+    let found = discover(&ns()?, &mut shorter)?;
+    assert_eq!(found.source, "Mozilla ISPDB for MX domain mailhost.net");
+    assert!(
+        found
+            .trace
+            .iter()
+            .any(|t| t == "Mozilla ISPDB for MX domain eu.mailhost.net: nothing found"),
+        "{:?}",
+        found.trace
+    );
+    Ok(())
 }

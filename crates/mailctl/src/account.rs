@@ -513,7 +513,11 @@ fn verify_new_account(
         })?,
     };
     probe.sent_folder = sent.clone();
-    backend.check_smtp(probe, &secret)?;
+    // Below `send` mailctl never opens SMTP, so it does not log in there either:
+    // the account must not fail on an SMTP server it will never use.
+    if args.access >= Access::Send {
+        backend.check_smtp(probe, &secret)?;
+    }
     Ok((Some(secret), sent))
 }
 
@@ -523,7 +527,7 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
     // Everything that can be checked locally is checked before any network,
     // password or keychain step.
     validate_account_name(&args.name)?;
-    let (path, text) = config_text(cli, backend)?;
+    let (_, text) = config_text(cli, backend)?;
     if Config::parse(&text)?.account(&args.name).is_ok() {
         return Err(Error::Config(format!(
             "account {} already exists",
@@ -558,6 +562,9 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
     let (secret, sent_folder) = verify_new_account(backend, args, &password, &mut probe)?;
     probe.sent_folder = sent_folder.clone();
     probe.access = args.access;
+    // Read the file again: it may have been edited while the prompts and
+    // logins above were running, and those edits must not be lost.
+    let (path, text) = config_text(cli, backend)?;
     // The edit is validated in a dry run as well; it is only written for real.
     setup::add_account(&text, &probe).and_then(|new_text| {
         if args.dry_run {

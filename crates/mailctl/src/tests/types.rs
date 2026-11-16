@@ -115,3 +115,13 @@ fn deserialization_goes_through_the_checks() {
         Some("7")
     );
 }
+
+#[test]
+fn inbox_is_case_insensitive() -> Result<(), Error> {
+    for spelling in ["inbox", "Inbox", "INBOX"] {
+        assert_eq!(MailboxName::new(spelling)?, MailboxName::inbox());
+    }
+    // Only the inbox itself; other names keep their case.
+    assert_eq!(MailboxName::new("Inbox/Sub")?.as_str(), "Inbox/Sub");
+    Ok(())
+}

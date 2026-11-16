@@ -49,19 +49,28 @@ pub fn uid_set(uids: &[Uid]) -> String {
 }
 
 /// Whether a folder keeps custom keywords such as `$Forwarded`, judged from
-/// its `PERMANENTFLAGS` (as flag names). Without that response code the
-/// list is empty, and RFC 3501 says all flags are then permanent. Keywords
-/// compare case-insensitively.
+/// the raw SELECT response. Without a `PERMANENTFLAGS` code RFC 3501 says
+/// all flags are permanent; an explicit `PERMANENTFLAGS ()` means none is.
+/// (The imap crate reports both as an empty list, hence the raw response.)
+/// Keywords compare case-insensitively.
 #[must_use]
-pub fn keywords_allowed(permanent_flags: &[String]) -> bool {
-    permanent_flags.is_empty()
-        || permanent_flags
-            .iter()
-            .any(|f| f == "\\*" || f.eq_ignore_ascii_case(FLAG_FORWARDED))
+pub fn keywords_allowed(select_response: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(select_response);
+    let upper = text.to_ascii_uppercase();
+    let Some(start) = upper.find("[PERMANENTFLAGS (") else {
+        return true;
+    };
+    let list = text
+        .get(start.saturating_add("[PERMANENTFLAGS (".len())..)
+        .and_then(|rest| rest.split(')').next())
+        .unwrap_or_default();
+    list.split_whitespace()
+        .any(|f| f == "\\*" || f.eq_ignore_ascii_case(FLAG_FORWARDED))
 }
 
-/// The mailbox argument for APPEND: modified UTF-7, with `\\` and `"`
-/// escaped, because the imap crate writes it between quotes as it is.
+/// A mailbox name as an IMAP quoted string's content: modified UTF-7, with
+/// `\\` and `"` escaped. The imap crate writes APPEND's mailbox between
+/// quotes as it is, and the raw SELECT needs the same.
 #[must_use]
 pub fn append_mailbox(folder: &MailboxName) -> String {
     utf7::encode(folder.as_str())

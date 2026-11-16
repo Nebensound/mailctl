@@ -287,16 +287,16 @@ fn srv_settings(net: &mut dyn Net, address: &EmailAddress) -> Option<ServerSetti
 }
 
 /// The registrable part of a host name, approximated by its last two labels.
-fn base_domain(host: &str) -> String {
+/// The domains an MX host may belong to, longest first: `mx1.mailhost.co.uk`
+/// gives `mailhost.co.uk`, then `co.uk`. Simply taking the last two labels
+/// would give a public suffix (`co.uk`) for such hosts; trying the
+/// candidates in turn finds the provider without a public-suffix list.
+fn mx_domains(host: &str) -> Vec<String> {
     let labels: Vec<&str> = host.trim_end_matches('.').split('.').collect();
-    labels
-        .iter()
-        .rev()
-        .take(2)
-        .rev()
-        .copied()
-        .collect::<Vec<_>>()
-        .join(".")
+    (1..labels.len().saturating_sub(1))
+        .filter_map(|start| labels.get(start..))
+        .map(|rest| rest.join("."))
+        .collect()
 }
 
 /// Percent-encodes `value` for a URL query: everything but the unreserved
@@ -479,16 +479,23 @@ pub fn discover(address: &EmailAddress, net: &mut dyn Net) -> Result<Discovery, 
     }
     let mx = run.net.mx(&domain);
     if let Some(first) = mx.first() {
-        let mx_domain = base_domain(first);
-        if mx_domain != domain {
+        // The first candidate the ISPDB knows decides; shorter ones are only
+        // tried while nothing is found.
+        for mx_domain in mx_domains(first).into_iter().filter(|d| *d != domain) {
             let url = format!("https://autoconfig.thunderbird.net/v1.1/{mx_domain}");
-            let settings = run.autoconfig(&url, address);
+            let Some(settings) = run.autoconfig(&url, address) else {
+                run.trace.push(format!(
+                    "Mozilla ISPDB for MX domain {mx_domain}: nothing found"
+                ));
+                continue;
+            };
             if let Some(found) = run.verified(
                 &format!("Mozilla ISPDB for MX domain {mx_domain}"),
-                settings,
+                Some(settings),
             ) {
                 return Ok(from_dns(found, &domain));
             }
+            break;
         }
     } else {
         run.trace.push(format!("{domain}: no MX record"));

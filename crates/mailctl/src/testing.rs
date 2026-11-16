@@ -453,6 +453,9 @@ pub(crate) struct FakeBackend {
     pub(crate) calls: Cell<usize>,
     /// Passed on to every connected [`FakeStore`] as `fail_at_call`.
     pub(crate) store_fail_at: Option<usize>,
+    /// Written to the configuration file while the password prompt is open,
+    /// as another shell editing it at that moment would.
+    pub(crate) edit_during_prompt: RefCell<Option<String>>,
 }
 
 const CONFIG_PATH: &str = "/cfg.toml";
@@ -473,6 +476,7 @@ impl FakeBackend {
             fail_at: None,
             calls: Cell::new(0),
             store_fail_at: None,
+            edit_during_prompt: RefCell::new(None),
         }
     }
 
@@ -570,6 +574,11 @@ impl Backend for FakeBackend {
     }
     fn prompt_password(&self, _prompt: &str) -> Result<Option<Secret>, Error> {
         self.step()?;
+        if let Some(text) = self.edit_during_prompt.borrow_mut().take() {
+            self.files
+                .borrow_mut()
+                .insert(PathBuf::from(CONFIG_PATH), text);
+        }
         Ok(self
             .terminal
             .then(|| Secret::new(Self::pop(&self.passwords).unwrap_or_else(|| "pw".into()))))

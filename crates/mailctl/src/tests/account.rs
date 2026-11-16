@@ -92,7 +92,8 @@ fn add_with_discovery_verifies_and_stores() -> Result<(), Error> {
     );
     let config = Config::parse(&b.file_text())?;
     assert_eq!(config.account("work")?.imap_host, "mail.example.net");
-    assert_eq!(b.smtp_checks.get(), 1);
+    // A read account never uses SMTP, so it is not logged in there either.
+    assert_eq!(b.smtp_checks.get(), 0);
     assert_eq!(config.account("work")?.access, Access::Read);
     let (v, _) = exec(&b, &["account", "set-access", "-a", "work", "organize"])?;
     assert_eq!(at(&v, "/access"), "organize");
@@ -1213,4 +1214,77 @@ fn hosts_named_on_the_command_line_need_no_confirmation() -> Result<(), Error> {
     )?;
     assert_eq!(code, 0, "{v}");
     Ok(())
+}
+
+#[test]
+fn only_send_accounts_are_checked_against_smtp() -> Result<(), Error> {
+    for (access, checks) in [("organize", 0), ("send", 1)] {
+        let b = FakeBackend::new(plesk_net());
+        b.passwords.borrow_mut().push("pw".into());
+        let (v, code) = exec(
+            &b,
+            &[
+                "account",
+                "add",
+                "--name",
+                "n",
+                "--address",
+                "alice@example.com",
+                "--access",
+                access,
+            ],
+        )?;
+        assert_eq!(code, 0, "{v}");
+        assert_eq!(b.smtp_checks.get(), checks, "{access}");
+    }
+    Ok(())
+}
+
+#[test]
+fn edits_made_during_the_prompts_are_kept() -> Result<(), Error> {
+    let b = configured()?;
+    let edited = allowlist_edit(&b.file_text())?;
+    b.edit_during_prompt.replace(Some(edited));
+    b.passwords.borrow_mut().clear();
+    b.passwords.borrow_mut().push("pw".into());
+    let (v, code) = exec(
+        &b,
+        &[
+            "account",
+            "add",
+            "--name",
+            "late",
+            "--address",
+            "alice@example.com",
+        ],
+    )?;
+    assert_eq!(code, 0, "{v}");
+    let config = Config::parse(&b.file_text())?;
+    assert!(config.account("late").is_ok());
+    assert!(config.forward_allowed(&EmailAddress::parse("added@example.de")?));
+
+    // A name taken in the meantime is refused instead of overwritten.
+    let b = configured()?;
+    let mut other = Config::parse(&b.file_text())?.account("work")?.clone();
+    other.name = "late".into();
+    let taken = crate::setup::add_account(&b.file_text(), &other)?;
+    b.edit_during_prompt.replace(Some(taken.clone()));
+    let error = error_of(
+        &b,
+        &[
+            "account",
+            "add",
+            "--name",
+            "late",
+            "--address",
+            "alice@example.com",
+        ],
+    )?;
+    assert!(error.contains("already exists"), "{error}");
+    assert_eq!(b.file_text(), taken);
+    Ok(())
+}
+
+fn allowlist_edit(text: &str) -> Result<String, Error> {
+    crate::setup::allowlist_add(text, &EmailAddress::parse("added@example.de")?)
 }

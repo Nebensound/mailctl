@@ -46,12 +46,23 @@ fn builds_uid_sets() -> Result<(), crate::error::Error> {
 
 #[test]
 fn keyword_support_follows_rfc_3501() {
-    let names = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let select =
+        |code: &str| format!("* FLAGS (\\Seen \\Flagged)\r\n{code}* 3 EXISTS\r\n").into_bytes();
     // No PERMANENTFLAGS code: all flags are permanent.
-    assert!(keywords_allowed(&[]));
-    assert!(keywords_allowed(&names(&["\\Seen", "\\*"])));
-    assert!(keywords_allowed(&names(&["\\Seen", "$forwarded"])));
-    assert!(!keywords_allowed(&names(&["\\Seen", "\\Flagged"])));
+    assert!(keywords_allowed(&select("")));
+    // An explicit empty list: nothing is permanent.
+    assert!(!keywords_allowed(&select(
+        "* OK [PERMANENTFLAGS ()] No permanent flags\r\n"
+    )));
+    assert!(keywords_allowed(&select(
+        "* OK [PERMANENTFLAGS (\\Seen \\*)] Limited\r\n"
+    )));
+    assert!(keywords_allowed(&select(
+        "* ok [permanentflags (\\Seen $forwarded)] x\r\n"
+    )));
+    assert!(!keywords_allowed(&select(
+        "* OK [PERMANENTFLAGS (\\Seen \\Flagged)] x\r\n"
+    )));
     // What the imap crate prints for the "may create" flag.
     assert_eq!(Flag::MayCreate.to_string(), "\\*");
 }

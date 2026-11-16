@@ -117,7 +117,10 @@ it for Gmail and Microsoft 365, which always file sent mail.
 Passwords come from the macOS keychain (`password = { keychain = "<service>" }`;
 the item's account is the mailctl account name, so two accounts with the same
 login on different servers never share a password) or from an environment variable (`password = { env = "VAR" }`)
-for cloud agents and CI. iCloud needs an app-specific password.
+for cloud agents and CI. iCloud needs an app-specific password. Items are
+keyed by service and account name, so several configuration files that use the
+same account names need a keychain service each
+(`account add --password-source keychain:<service>`).
 
 ```sh
 security add-generic-password -s mailctl -a icloud -w
@@ -134,9 +137,10 @@ mailctl account test -a work --smtp
 
 `account add` finds the servers automatically, asks for the password without
 echo (or reads it with `--password-stdin`), logs in, detects the sent folder
-(RFC 6154 `\Sent`, else common names), checks the SMTP login, stores the
-password in the keychain and adds the account to the configuration, keeping
-comments. `--dry-run` shows the result without writing anything.
+(RFC 6154 `\Sent`, else common names), checks the SMTP login (only for
+`--access send`; after raising an account to `send` later, run `account test
+--smtp`), stores the password in the keychain and adds the account to the
+configuration, keeping comments. `--dry-run` shows the result without writing anything.
 
 Discovery order (like Thunderbird): built-in presets (iCloud, Gmail,
 Outlook.com, GMX, WEB.DE, Posteo) → the provider's autoconfig

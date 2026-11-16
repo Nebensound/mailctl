@@ -779,3 +779,55 @@ fn a_copy_the_server_filed_itself_is_not_stored_again() -> Result<(), Error> {
     assert_eq!(store.uids_of("Sent").len(), 1);
     Ok(())
 }
+
+#[test]
+fn dry_runs_examine_instead_of_selecting() -> Result<(), Error> {
+    let inbox = folder("INBOX")?;
+    let mut store = FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])]);
+    mark_read(&mut store, &inbox, uid(2)?, &expect("m2@test")?, true)?;
+    assert!(
+        store.read_only,
+        "mark_read --dry-run must not open read-write"
+    );
+    store.read_only = false;
+    move_mail(
+        &mut store,
+        &inbox,
+        uid(2)?,
+        &expect("m2@test")?,
+        &folder("Work/GitHub")?,
+        true,
+        true,
+    )?;
+    assert!(store.read_only, "move --dry-run must not open read-write");
+    store.read_only = false;
+    mark_read(&mut store, &inbox, uid(2)?, &expect("m2@test")?, false)?;
+    assert!(!store.read_only, "a real change needs SELECT");
+    Ok(())
+}
+
+#[test]
+fn moves_into_the_inbox_however_it_is_spelled() -> Result<(), Error> {
+    let mut store = FakeStore::with_inbox(Vec::new());
+    store
+        .folders
+        .entry("Work/GitHub".into())
+        .or_default()
+        .push(mail(7, "a@x", "Back", &[]));
+    let report = move_mail(
+        &mut store,
+        &folder("Work/GitHub")?,
+        uid(7)?,
+        &expect("m7@test")?,
+        &folder("inbox")?,
+        false,
+        false,
+    )?;
+    assert!(report.confirmed);
+    assert_eq!(store.uids_of("INBOX").len(), 1);
+    assert_eq!(
+        create_folder(&mut store, &folder("Inbox")?, true),
+        Err(Error::FolderExists("INBOX".into()))
+    );
+    Ok(())
+}

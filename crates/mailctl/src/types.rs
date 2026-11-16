@@ -161,7 +161,8 @@ impl fmt::Display for MessageId {
 pub struct MailboxName(String);
 
 impl MailboxName {
-    /// Creates a mailbox name.
+    /// Creates a mailbox name. `INBOX` is case-insensitive (RFC 3501 §5.1)
+    /// and is always spelled `INBOX`, so `inbox` and `Inbox` compare equal.
     ///
     /// # Errors
     /// Returns [`Error::InvalidInput`] for empty names or names with control characters.
@@ -170,6 +171,9 @@ impl MailboxName {
             return Err(Error::InvalidInput(format!(
                 "invalid mailbox name: {raw:?}"
             )));
+        }
+        if raw.eq_ignore_ascii_case("INBOX") {
+            return Ok(Self::inbox());
         }
         Ok(Self(raw.to_owned()))
     }

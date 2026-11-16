@@ -7,7 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::adapters::{imap::ImapStore, net::SystemNet, smtp::SmtpSender};
 use crate::cli::Backend;
-use crate::config::{AccountConfig, Secret, SecretLookup, keychain_store_command};
+use crate::config::{
+    AccountConfig, Secret, SecretLookup, keychain_password, keychain_store_command,
+};
 use crate::discover::Net;
 use crate::error::Error;
 use crate::store::{MailSender, MailStore};
@@ -25,7 +27,7 @@ impl SecretLookup for SystemBackend {
 
     fn keychain(&self, service: &str, account: &str) -> Result<String, String> {
         let output = Command::new("security")
-            .args(["find-generic-password", "-s", service, "-a", account, "-w"])
+            .args(["find-generic-password", "-s", service, "-a", account, "-g"])
             .output()
             .map_err(|e| format!("cannot run `security`: {e}"))?;
         if !output.status.success() {
@@ -34,9 +36,7 @@ impl SecretLookup for SystemBackend {
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        let output =
-            String::from_utf8(output.stdout).map_err(|_| "password is not UTF-8".to_owned())?;
-        Ok(Secret::from_keychain_output(&output).expose().to_owned())
+        keychain_password(&String::from_utf8_lossy(&output.stderr))
     }
 }
 

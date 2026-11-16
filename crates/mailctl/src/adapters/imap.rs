@@ -93,16 +93,13 @@ impl MailStore for ImapStore {
     }
 
     fn select(&mut self, folder: &MailboxName) -> Result<(), Error> {
-        let mailbox = self
+        // Raw SELECT: the parsed response cannot tell an absent PERMANENTFLAGS
+        // code from an empty one, and that decides `keywords_allowed`.
+        let (response, _) = self
             .session
-            .select(utf7::encode(folder.as_str()))
+            .run(format!("SELECT \"{}\"", append_mailbox(folder)))
             .map_err(store_err)?;
-        let permanent: Vec<String> = mailbox
-            .permanent_flags
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        self.keywords = keywords_allowed(&permanent);
+        self.keywords = keywords_allowed(&response);
         Ok(())
     }
 

@@ -155,22 +155,25 @@ fn entered_passwords_are_checked() -> Result<(), Error> {
 }
 
 #[test]
-fn keychain_output_is_decoded_like_security_prints_it() {
-    let read = |raw: &str| Secret::from_keychain_output(raw).expose().to_owned();
-    // ASCII comes back as it is, even when it looks like hex.
-    assert_eq!(read("geheim\n"), "geheim");
-    assert_eq!(read("deadbeef\n"), "deadbeef");
-    assert_eq!(read("6162"), "6162");
-    assert_eq!(read("123456\n"), "123456");
-    assert_eq!(read("20241231"), "20241231");
-    assert_eq!(read("0a0b0c0d"), "0a0b0c0d");
-    // Anything else is printed as hex: "grün" in UTF-8.
-    assert_eq!(read("6772c3bc6e\n"), "grün");
-    // Odd length, non-hex characters or invalid UTF-8 are not hex output.
-    assert_eq!(read("abc"), "abc");
-    assert_eq!(read("+f"), "+f");
-    assert_eq!(read("ff"), "ff");
-    assert_eq!(read(""), "");
+fn keychain_passwords_are_read_from_the_g_output() {
+    let read = |stderr: &str| keychain_password(stderr);
+    assert_eq!(read("password: \"geheim\"\n"), Ok("geheim".to_owned()));
+    // Looks like hex, but `security` printed it in quotes: taken as it is.
+    assert_eq!(
+        read("password: \"c3a4c3b6c3bc\"\n"),
+        Ok("c3a4c3b6c3bc".to_owned())
+    );
+    assert_eq!(read("password: \"123456\"\n"), Ok("123456".to_owned()));
+    assert_eq!(read("password: \"pa\"ss\"\n"), Ok("pa\"ss".to_owned()));
+    // Not printable ASCII: printed as hex, here "grün".
+    assert_eq!(
+        read("password: 0x6772C3BC6E  \"gr\\303\\274n\"\n"),
+        Ok("grün".to_owned())
+    );
+    assert_eq!(read("password: \n"), Ok(String::new()));
+    assert!(read("keychain: \"/x\"\n").is_err());
+    assert!(read("password: 0xZZ  \"x\"\n").is_err());
+    assert!(read("password: 0xFF  \"x\"\n").is_err());
 }
 
 #[test]

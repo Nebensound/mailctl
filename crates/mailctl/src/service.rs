@@ -108,6 +108,16 @@ fn header_of(store: &mut dyn MailStore, uid: Uid) -> Result<RawHeader, Error> {
         .ok_or(Error::NotFound(uid.get()))
 }
 
+/// Opens `folder` for a change: read-write, or with EXAMINE for a dry run, so
+/// a preview does not clear `\Recent` for other clients.
+fn open(store: &mut dyn MailStore, folder: &MailboxName, dry_run: bool) -> Result<(), Error> {
+    if dry_run {
+        store.select_read_only(folder)
+    } else {
+        store.select(folder)
+    }
+}
+
 /// Checks that the mail at `uid` in the selected folder is the expected one.
 fn verify(store: &mut dyn MailStore, uid: Uid, expect: &Expect) -> Result<MailSummary, Error> {
     let summary = model::summary_from_header(&header_of(store, uid)?);
@@ -168,7 +178,7 @@ pub fn mark_read(
     expect: &Expect,
     dry_run: bool,
 ) -> Result<ActionReport, Error> {
-    store.select(folder)?;
+    open(store, folder, dry_run)?;
     let mail = verify(store, uid, expect)?;
     let mut confirmed = false;
     if !dry_run {
@@ -255,7 +265,7 @@ pub fn move_mail(
     if !store.supports_move()? {
         return Err(Error::MoveUnsupported);
     }
-    store.select(folder)?;
+    open(store, folder, dry_run)?;
     let mail = verify(store, uid, expect)?;
     let mut confirmed = false;
     if !dry_run {
@@ -402,6 +412,8 @@ pub fn forward(
     if !config.forward_allowed(job.to) {
         return Err(Error::ForwardNotAllowed(job.to.to_string()));
     }
+    // SELECT even in a dry run: EXAMINE reports no permanent flags, and the
+    // keyword check below must see the real ones.
     store.select(job.folder)?;
     let mail = verify(store, job.uid, job.expect)?;
     if mail.flags.forwarded {
