@@ -114,18 +114,30 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - { os: ubuntu-latest }
+          - { os: macos-latest }
+          # The static Linux binary the release workflow ships.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, features: vendored-openssl }
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked
+      - if: matrix.target
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked ${{ matrix.target && format('--target {0}', matrix.target) || '' }} ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
       - name: smoke test outside the source tree
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
-          bin="$PWD/target/release/mailctl"
+          bin="$PWD/target/${TARGET:+$TARGET/}release/mailctl"
+          if [ -n "$TARGET" ]; then
+            file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          fi
           cd "$RUNNER_TEMP"
           "$bin" --version
           "$bin" ref '<a@example.com>' | grep -q '"mail_ref"'

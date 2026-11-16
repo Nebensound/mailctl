@@ -10,9 +10,11 @@ fall back to copy-and-expunge on servers without the IMAP `MOVE` extension.
 
 ## Installation
 
-Binaries for macOS (Apple Silicon and Intel) and Linux are attached to each
-[GitHub release](https://github.com/Nebensound/mailctl/releases); unpack one
-and put `mailctl` on your `PATH`. With Rust installed:
+Binaries for macOS (Apple Silicon and Intel) and Linux (x86_64) are attached
+to each [GitHub release](https://github.com/Nebensound/mailctl/releases);
+unpack one and put `mailctl` on your `PATH`. The Linux binary is statically
+linked (musl, OpenSSL compiled in), so it needs no particular glibc or
+OpenSSL and runs in slim container images. With Rust installed:
 
 ```sh
 cargo install mailctl --locked
@@ -284,9 +286,18 @@ release smoke test.
 The release workflow then checks that the tag matches the version and is on
 `main`, runs the full CI, builds the binaries, creates the GitHub release with
 them and finally publishes the crate to crates.io (a crates.io version can
-never be replaced, so that comes last). It needs the repository secret
+never be replaced, so that comes last). It needs the secret
 `CARGO_REGISTRY_TOKEN` (a crates.io API token with the `publish-update` and,
 for the first release, `publish-new` scope) in the `crates-io` environment.
+
+Repository settings that keep the release path as protected as `main`:
+
+- Environment `crates-io`: deployment refs limited to tags matching `v*`, so
+  the token is not available to branch workflows.
+- A tag ruleset for `v*` that only maintainers may create, update or delete.
+- After the first release, crates.io Trusted Publishing
+  (`rust-lang/crates-io-auth-action`) can replace the long-lived token; the
+  first publish of a new crate still needs one.
 
 ## Status
 
