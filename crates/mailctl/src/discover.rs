@@ -16,15 +16,7 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::types::EmailAddress;
 
-/// Transport security of an endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Security {
-    /// TLS from the first byte (IMAP 993, SMTP 465).
-    Tls,
-    /// Plain connection upgraded with `STARTTLS` (SMTP 587).
-    StartTls,
-}
+pub use crate::types::Security;
 
 /// A server endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -111,7 +103,6 @@ pub trait Net {
 
 use crate::types::{
     IMAPS_PORT as IMAPS, SUBMISSION_PORT as SUBMISSION, SUBMISSIONS_PORT as SUBMISSIONS,
-    smtp_implicit_tls,
 };
 
 /// Built-in settings for large providers: domains, IMAP host, SMTP host, SMTP port.
@@ -166,20 +157,12 @@ const PRESETS: &[(&str, &[&str], &str, &str, u16)] = &[
     ),
 ];
 
-fn smtp_security(port: u16) -> Security {
-    if smtp_implicit_tls(port) {
-        Security::Tls
-    } else {
-        Security::StartTls
-    }
-}
-
 /// An SMTP endpoint whose security follows from the port.
 pub(crate) fn smtp_endpoint(host: &str, port: u16) -> Endpoint {
     Endpoint {
         host: host.to_owned(),
         port,
-        security: smtp_security(port),
+        security: Security::for_smtp_port(port),
     }
 }
 
@@ -195,7 +178,7 @@ pub fn preset(address: &EmailAddress) -> Option<(&'static str, ServerSettings)> 
                 *name,
                 ServerSettings {
                     imap: Endpoint::new(imap, IMAPS, Security::Tls),
-                    smtp: Endpoint::new(smtp, *port, smtp_security(*port)),
+                    smtp: Endpoint::new(smtp, *port, Security::for_smtp_port(*port)),
                     username: address.to_string(),
                 },
             )

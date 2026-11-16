@@ -146,10 +146,13 @@ fn entered_passwords_are_checked() -> Result<(), Error> {
 #[test]
 fn keychain_output_is_decoded_like_security_prints_it() {
     let read = |raw: &str| Secret::from_keychain_output(raw).expose().to_owned();
-    // Printable ASCII comes back as it is, even when it looks like hex.
+    // ASCII comes back as it is, even when it looks like hex.
     assert_eq!(read("geheim\n"), "geheim");
     assert_eq!(read("deadbeef\n"), "deadbeef");
     assert_eq!(read("6162"), "6162");
+    assert_eq!(read("123456\n"), "123456");
+    assert_eq!(read("20241231"), "20241231");
+    assert_eq!(read("0a0b0c0d"), "0a0b0c0d");
     // Anything else is printed as hex: "grün" in UTF-8.
     assert_eq!(read("6772c3bc6e\n"), "grün");
     // Odd length, non-hex characters or invalid UTF-8 are not hex output.
@@ -157,4 +160,19 @@ fn keychain_output_is_decoded_like_security_prints_it() {
     assert_eq!(read("+f"), "+f");
     assert_eq!(read("ff"), "ff");
     assert_eq!(read(""), "");
+}
+
+#[test]
+fn smtp_security_is_kept_or_derived_from_the_port() -> Result<(), Error> {
+    let base = SAMPLE.replace("smtp_port = 465", "smtp_port = 2465");
+    let derived = Config::parse(&base)?;
+    assert_eq!(derived.account("work")?.smtp_tls(), Security::StartTls);
+    assert_eq!(derived.account("icloud")?.smtp_tls(), Security::StartTls);
+    let stored = Config::parse(&base.replace(
+        "smtp_port = 2465",
+        "smtp_port = 2465\nsmtp_security = \"tls\"",
+    ))?;
+    assert_eq!(stored.account("work")?.smtp_tls(), Security::Tls);
+    assert!(Config::parse(&base.replace("smtp_port = 2465", "smtp_security = \"ssl\"")).is_err());
+    Ok(())
 }

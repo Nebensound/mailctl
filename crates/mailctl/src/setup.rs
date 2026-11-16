@@ -7,7 +7,7 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, val
 
 use crate::config::{Access, Config, PasswordSource};
 use crate::error::Error;
-use crate::types::{EmailAddress, MailboxName};
+use crate::types::{EmailAddress, MailboxName, Security};
 
 /// A new account entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +26,8 @@ pub struct NewAccount {
     pub smtp_host: String,
     /// SMTP port.
     pub smtp_port: u16,
+    /// SMTP security.
+    pub smtp_security: Security,
     /// SMTP login, if different from `user`.
     pub smtp_user: Option<String>,
     /// Sent folder.
@@ -85,6 +87,7 @@ pub fn add_account(text: &str, account: &NewAccount) -> Result<String, Error> {
     table.insert("imap_port", port_value(account.imap_port));
     table.insert("smtp_host", value(account.smtp_host.as_str()));
     table.insert("smtp_port", port_value(account.smtp_port));
+    table.insert("smtp_security", value(account.smtp_security.as_str()));
     if let Some(user) = &account.smtp_user {
         table.insert("smtp_user", value(user.as_str()));
     }

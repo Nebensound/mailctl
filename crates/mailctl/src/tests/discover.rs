@@ -256,7 +256,7 @@ fn reports_trace_when_nothing_works() -> Result<(), Error> {
 fn helpers() {
     assert_eq!(base_domain("mx01.mail.example.co."), "example.co");
     assert_eq!(base_domain("localhost"), "localhost");
-    assert_eq!(smtp_security(465), Security::Tls);
+    assert_eq!(Security::for_smtp_port(465), Security::Tls);
 }
 
 #[test]

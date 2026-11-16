@@ -43,6 +43,8 @@ pub(crate) struct FakeStore {
     pub(crate) hide_bodies: bool,
     pub(crate) lose_appends: bool,
     pub(crate) fail_all: bool,
+    /// The server forgets custom keywords such as `$Forwarded`.
+    pub(crate) no_keywords: bool,
     /// Fail the store call with this zero-based number (and only that one).
     pub(crate) fail_at_call: Option<usize>,
     /// Number of store calls so far.
@@ -121,6 +123,7 @@ impl FakeStore {
             hide_bodies: false,
             lose_appends: false,
             fail_all: false,
+            no_keywords: false,
             fail_at_call: None,
             calls: Cell::new(0),
             read_only: false,
@@ -225,6 +228,11 @@ impl MailStore for FakeStore {
         Ok(())
     }
 
+    fn keywords_allowed(&mut self) -> Result<bool, Error> {
+        self.check()?;
+        Ok(!self.no_keywords)
+    }
+
     fn uids(&mut self) -> Result<Vec<Uid>, Error> {
         self.check()?;
         Ok(self
@@ -274,8 +282,12 @@ impl MailStore for FakeStore {
         if self.ignore_flags {
             return Ok(());
         }
+        let keep_keywords = !self.no_keywords;
         if let Some(m) = self.current()?.iter_mut().find(|m| m.uid == uid.get()) {
-            for flag in flags {
+            for flag in flags
+                .iter()
+                .filter(|f| keep_keywords || f.starts_with('\\'))
+            {
                 if !m.flags.iter().any(|f| f == flag) {
                     m.flags.push((*flag).to_owned());
                 }
@@ -363,6 +375,9 @@ impl MailStore for Shared {
     }
     fn select_read_only(&mut self, folder: &MailboxName) -> Result<(), Error> {
         self.0.borrow_mut().select_read_only(folder)
+    }
+    fn keywords_allowed(&mut self) -> Result<bool, Error> {
+        self.0.borrow_mut().keywords_allowed()
     }
     fn uids(&mut self) -> Result<Vec<Uid>, Error> {
         self.0.borrow_mut().uids()

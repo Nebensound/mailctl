@@ -24,7 +24,7 @@ impl SmtpSender {
     /// # Errors
     /// Invalid host configuration.
     pub fn new(account: &AccountConfig, secret: &Secret) -> Result<Self, Error> {
-        let builder = if crate::types::smtp_implicit_tls(account.smtp_port) {
+        let builder = if account.smtp_tls() == crate::types::Security::Tls {
             SmtpTransport::relay(&account.smtp_host)
         } else {
             SmtpTransport::starttls_relay(&account.smtp_host)

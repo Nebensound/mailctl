@@ -1,19 +1,28 @@
 //! [`MailStore`] over IMAP with implicit TLS.
 
 use std::borrow::Cow;
+use std::time::Duration;
 
 use ::imap::types::Flag;
 use imap_proto::NameAttribute;
 
+use crate::adapters::net::connect_any;
 use crate::config::{AccountConfig, Secret};
 use crate::error::Error;
-use crate::store::{FolderInfo, MailStore, RawHeader, RawMessage};
+use crate::store::{FLAG_FORWARDED, FolderInfo, MailStore, RawHeader, RawMessage};
 use crate::types::{MailboxName, MessageId, Uid};
 use crate::utf7;
+
+/// Timeout for connecting.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Timeout for each read or write, so a stalled server cannot hang a command.
+const IO_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// An authenticated IMAP session.
 pub struct ImapStore {
     session: ::imap::Session<::imap::Connection>,
+    /// Whether the selected folder keeps custom keywords (`PERMANENTFLAGS`).
+    keywords: bool,
 }
 
 fn store_err(e: impl std::fmt::Display) -> Error {
@@ -57,13 +66,26 @@ impl ImapStore {
     /// # Errors
     /// Connection, TLS or login errors.
     pub fn connect(account: &AccountConfig, secret: &Secret) -> Result<Self, Error> {
-        let client = ::imap::ClientBuilder::new(account.imap_host.as_str(), account.imap_port)
-            .connect()
+        // Always implicit TLS, whatever the port: the imap crate's default
+        // would only use it on 993 and expect a plain greeting elsewhere.
+        let tcp = connect_any(&account.imap_host, account.imap_port, CONNECT_TIMEOUT)
             .map_err(store_err)?;
+        tcp.set_read_timeout(Some(IO_TIMEOUT)).map_err(store_err)?;
+        tcp.set_write_timeout(Some(IO_TIMEOUT)).map_err(store_err)?;
+        let tls = native_tls::TlsConnector::new()
+            .map_err(store_err)?
+            .connect(&account.imap_host, tcp)
+            .map_err(store_err)?;
+        let connection: ::imap::Connection = Box::new(tls);
+        let mut client = ::imap::Client::new(connection);
+        client.read_greeting().map_err(store_err)?;
         let session = client
             .login(&account.user, secret.expose())
             .map_err(|(e, _)| store_err(e))?;
-        Ok(Self { session })
+        Ok(Self {
+            session,
+            keywords: false,
+        })
     }
 }
 
@@ -76,31 +98,46 @@ impl Drop for ImapStore {
 impl MailStore for ImapStore {
     fn folders(&mut self) -> Result<Vec<FolderInfo>, Error> {
         let names = self.session.list(Some(""), Some("*")).map_err(store_err)?;
-        names
+        // A name that is not valid modified UTF-7 (written by another client)
+        // is skipped instead of failing the whole listing.
+        Ok(names
             .iter()
-            .map(|n| {
-                Ok(FolderInfo {
-                    name: MailboxName::new(&utf7::decode(n.name())?)?,
+            .filter_map(|n| {
+                let name = utf7::decode(n.name())
+                    .and_then(|decoded| MailboxName::new(&decoded))
+                    .ok()?;
+                Some(FolderInfo {
+                    name,
                     delimiter: n.delimiter().map(str::to_owned),
                     selectable: !n.attributes().contains(&NameAttribute::NoSelect),
                     special_use: n.attributes().iter().find_map(special_use),
                 })
             })
-            .collect()
+            .collect())
     }
 
     fn select(&mut self, folder: &MailboxName) -> Result<(), Error> {
-        self.session
+        let mailbox = self
+            .session
             .select(utf7::encode(folder.as_str()))
-            .map(|_| ())
-            .map_err(store_err)
+            .map_err(store_err)?;
+        self.keywords = mailbox
+            .permanent_flags
+            .iter()
+            .any(|f| matches!(f, Flag::MayCreate) || f.to_string() == FLAG_FORWARDED);
+        Ok(())
     }
 
     fn select_read_only(&mut self, folder: &MailboxName) -> Result<(), Error> {
+        self.keywords = false;
         self.session
             .examine(utf7::encode(folder.as_str()))
             .map(|_| ())
             .map_err(store_err)
+    }
+
+    fn keywords_allowed(&mut self) -> Result<bool, Error> {
+        Ok(self.keywords)
     }
 
     fn uids(&mut self) -> Result<Vec<Uid>, Error> {

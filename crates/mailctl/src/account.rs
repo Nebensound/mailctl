@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use crate::cli::{Backend, Cli};
+use crate::cli::{Backend, Cli, emit};
 use crate::config::{Access, AccountConfig, Config, PasswordSource, Secret, resolve_password};
 use crate::discover::{self, Discovery, Endpoint, Security, ServerSettings, smtp_endpoint};
 use crate::error::Error;
@@ -136,10 +136,6 @@ pub enum AllowlistCommand {
         /// E-mail address.
         address: String,
     },
-}
-
-fn emit<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<u8, Error> {
-    crate::cli::write_json(out, value).map(|()| 0)
 }
 
 /// Parses `keychain`, `keychain:<service>` or `env:<VARIABLE>`.
@@ -477,6 +473,33 @@ fn obtain_password(
     }
 }
 
+/// An unverified password must not replace the keychain item that another,
+/// working account logs in with.
+fn refuse_shared_unverified(
+    text: &str,
+    password: &PasswordSource,
+    user: &str,
+) -> Result<(), Error> {
+    let PasswordSource::Keychain(service) = password else {
+        return Ok(());
+    };
+    let shared_with = Config::parse(text).ok().and_then(|config| {
+        config
+            .accounts
+            .into_iter()
+            .find(|other| other.password == *password && other.user == user)
+    });
+    match shared_with {
+        Some(other) => Err(Error::InvalidInput(format!(
+            "account {} uses the same keychain item ({service}/{user}); an unverified \
+             password would replace its working one. Add without --no-verify, or change \
+             it with `mailctl account set-password -a {}`",
+            other.name, other.name
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// Logs in (unless `--no-verify`), detects the sent folder and checks SMTP.
 fn verify_new_account(
     backend: &dyn Backend,
@@ -547,11 +570,15 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
         imap_port: settings.imap.port,
         smtp_host: settings.smtp.host.clone(),
         smtp_port: settings.smtp.port,
+        smtp_security: Some(settings.smtp.security),
         smtp_user: args.smtp_user.clone(),
         sent_folder: placeholder_sent,
         password: password.clone(),
         access: Access::Read,
     };
+    if args.no_verify {
+        refuse_shared_unverified(&text, &password, &probe.user)?;
+    }
     let (secret, sent_folder) = verify_new_account(backend, args, &password, &mut probe)?;
     let new_text = setup::add_account(
         &text,
@@ -563,6 +590,7 @@ fn add(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write, args: &AddArgs) ->
             imap_port: probe.imap_port,
             smtp_host: probe.smtp_host.clone(),
             smtp_port: probe.smtp_port,
+            smtp_security: settings.smtp.security,
             smtp_user: args.smtp_user.clone(),
             sent_folder: sent_folder.clone(),
             password: password.clone(),

@@ -1053,3 +1053,71 @@ fn failures_while_confirming_foreign_servers_are_reported() -> Result<(), Error>
     }
     Err(Error::Store("never succeeded".into()))
 }
+
+#[test]
+fn unverified_passwords_do_not_replace_a_shared_keychain_item() -> Result<(), Error> {
+    let b = configured()?;
+    let before = b.keychain.borrow().clone();
+    let file = b.file_text();
+    b.stdin.borrow_mut().clear();
+    b.stdin.borrow_mut().push_str("typo");
+    let add = |name: &'static str, user: &'static str| -> Vec<&'static str> {
+        vec![
+            "account",
+            "add",
+            "--name",
+            name,
+            "--address",
+            "alice@example.com",
+            "--user",
+            user,
+            "--imap-host",
+            "mail.example.net",
+            "--smtp-host",
+            "mail.example.net",
+            "--no-verify",
+            "--sent-folder",
+            "Sent",
+            "--password-stdin",
+        ]
+    };
+    let error = error_of(&b, &add("work2", "alice"))?;
+    assert!(
+        error.contains("account work uses the same keychain item"),
+        "{error}"
+    );
+    assert_eq!(*b.keychain.borrow(), before);
+    assert_eq!(b.file_text(), file);
+
+    // A login of its own is fine.
+    let (v, code) = exec(&b, &add("carol", "carol"))?;
+    assert_eq!(code, 0, "{v}");
+    Ok(())
+}
+
+#[test]
+fn discovered_smtp_security_is_stored() -> Result<(), Error> {
+    // Implicit TLS on a port other than 465, as an SRV record can announce.
+    let mut net = srv_net("mail.example.com", "smtp.example.com");
+    net.srv.insert(
+        "_submissions._tcp.example.com".into(),
+        vec![crate::discover::SrvRecord {
+            target: "smtp.example.com".into(),
+            port: 2465,
+            priority: 0,
+            weight: 0,
+        }],
+    );
+    net.ok.push(("smtp.example.com".into(), 2465));
+    let b = FakeBackend::new(net);
+    b.passwords.borrow_mut().push("pw".into());
+    let (v, code) = exec(&b, ADD_ATTACKER)?;
+    assert_eq!(code, 0, "{v}");
+    let config = Config::parse(&b.file_text())?;
+    let account = config.account("n")?;
+    assert_eq!(
+        (account.smtp_port, account.smtp_tls()),
+        (2465, Security::Tls)
+    );
+    Ok(())
+}

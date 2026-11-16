@@ -78,6 +78,13 @@ pub trait MailStore {
     /// # Errors
     /// Server errors, e.g. a missing folder.
     fn select_read_only(&mut self, folder: &MailboxName) -> Result<(), Error>;
+    /// Whether the selected folder keeps custom keywords such as
+    /// `$Forwarded` (`PERMANENTFLAGS` with `\*`). Without them a server
+    /// accepts the flag silently and forgets it.
+    ///
+    /// # Errors
+    /// Server errors.
+    fn keywords_allowed(&mut self) -> Result<bool, Error>;
     /// All UIDs in the selected folder, in any order.
     ///
     /// # Errors

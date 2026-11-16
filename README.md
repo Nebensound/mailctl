@@ -98,8 +98,11 @@ password = { env = "MAILCTL_PASSWORD_HOME" }
 ```
 
 Host names and sent folders above are examples; check them with
-`mailctl folders -a <name>`. Defaults: IMAP port 993 (TLS), SMTP port 587
-(STARTTLS; port 465 uses implicit TLS).
+`mailctl folders -a <name>`. IMAP always uses TLS from the first byte, on
+`imap_port` (default 993). SMTP uses `smtp_port` (default 587) with
+`smtp_security = "starttls"` or `"tls"`; `account add` stores what discovery
+found, and without the key port 465 means TLS and any other port STARTTLS.
+Folder names that are not valid IMAP modified UTF-7 are left out of listings.
 
 Passwords come from the macOS keychain (`password = { keychain = "<service>" }`,
 account = `user`) or from an environment variable (`password = { env = "VAR" }`)

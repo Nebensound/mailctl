@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+use crate::cache::CachedStore;
 use crate::config::{Access, AccountConfig, Config, Secret, SecretLookup, resolve_password};
 use crate::discover::Net;
 use crate::error::Error;
@@ -264,7 +265,7 @@ fn output_error(e: serde_json::Error) -> Error {
 ///
 /// # Errors
 /// [`Error::InvalidInput`] if `out` fails.
-pub(crate) fn write_json<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<(), Error> {
+fn write_json<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<(), Error> {
     serde_json::to_writer_pretty(&mut *out, value)
         .and_then(|()| writeln!(out).map_err(serde_json::Error::io))
         .map_err(output_error)
@@ -332,7 +333,11 @@ pub fn run(cli: &Cli, backend: &dyn Backend, out: &mut dyn Write) -> u8 {
     }
 }
 
-fn emit<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<u8, Error> {
+/// Writes `value` as the command's JSON result; exit code 0.
+///
+/// # Errors
+/// [`Error::InvalidInput`] if `out` fails.
+pub(crate) fn emit<T: Serialize>(out: &mut dyn Write, value: &T) -> Result<u8, Error> {
     write_json(out, value).map(|()| 0)
 }
 
@@ -361,7 +366,9 @@ impl<'a> Session<'a> {
     }
 
     fn store(&self) -> Result<Box<dyn MailStore>, Error> {
-        let inner = self.backend.connect(&self.account, &self.secret)?;
+        let inner = Box::new(CachedStore::new(
+            self.backend.connect(&self.account, &self.secret)?,
+        ));
         Ok(Box::new(GuardedStore::new(
             inner,
             &self.account.name,

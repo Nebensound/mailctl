@@ -15,10 +15,41 @@ pub const SUBMISSION_PORT: u16 = 587;
 pub const SUBMISSIONS_PORT: u16 = 465;
 
 /// Whether SMTP on `port` speaks TLS from the first byte (465) instead of
-/// upgrading with STARTTLS.
+/// upgrading with STARTTLS, when nothing else is known.
 #[must_use]
 pub fn smtp_implicit_tls(port: u16) -> bool {
     port == SUBMISSIONS_PORT
+}
+
+/// Transport security of a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Security {
+    /// TLS from the first byte (IMAP 993, SMTP 465).
+    Tls,
+    /// Plain connection upgraded with `STARTTLS` (SMTP 587).
+    StartTls,
+}
+
+impl Security {
+    /// The usual security for SMTP on `port`: implicit TLS on 465, else STARTTLS.
+    #[must_use]
+    pub fn for_smtp_port(port: u16) -> Self {
+        if smtp_implicit_tls(port) {
+            Self::Tls
+        } else {
+            Self::StartTls
+        }
+    }
+
+    /// The name used in the configuration file.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tls => "tls",
+            Self::StartTls => "starttls",
+        }
+    }
 }
 
 /// An IMAP UID within one mailbox.

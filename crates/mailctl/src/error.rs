@@ -74,4 +74,10 @@ pub enum Error {
     /// is not the fix.
     #[error("partly done: {0}")]
     Partial(String),
+    /// The server forgets custom keywords in this folder, so `$Forwarded`
+    /// cannot protect against forwarding a mail twice.
+    #[error(
+        "the server does not keep $Forwarded in {0}; refusing to forward, a repeat could not be detected"
+    )]
+    KeywordsUnsupported(String),
 }

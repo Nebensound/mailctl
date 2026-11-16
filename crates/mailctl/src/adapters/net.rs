@@ -12,6 +12,23 @@ use crate::discover::{Endpoint, Net, Probe, Security, SrvRecord};
 /// Timeout for every network step.
 const TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Connects to the first address of `host` that accepts a connection within
+/// `timeout` each. Trying all of them matters where the resolver returns an
+/// IPv6 address first on a network without IPv6.
+///
+/// # Errors
+/// The error of the last address tried, or of the name lookup.
+pub(crate) fn connect_any(host: &str, port: u16, timeout: Duration) -> std::io::Result<TcpStream> {
+    let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "no address");
+    for address in (host, port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&address, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 /// Network access for discovery.
 pub struct SystemNet {
     agent: ureq::Agent,
@@ -140,14 +157,7 @@ impl Net for SystemNet {
     }
 
     fn probe(&mut self, endpoint: &Endpoint) -> Probe {
-        let address = match (endpoint.host.as_str(), endpoint.port).to_socket_addrs() {
-            Ok(mut addresses) => match addresses.next() {
-                Some(address) => address,
-                None => return Probe::Unreachable("no address".into()),
-            },
-            Err(e) => return Probe::Unreachable(e.to_string()),
-        };
-        let stream = match TcpStream::connect_timeout(&address, TIMEOUT) {
+        let stream = match connect_any(&endpoint.host, endpoint.port, TIMEOUT) {
             Ok(stream) => stream,
             Err(e) => return Probe::Unreachable(e.to_string()),
         };

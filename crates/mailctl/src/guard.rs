@@ -50,6 +50,10 @@ impl MailStore for GuardedStore {
         self.inner.select_read_only(folder)
     }
 
+    fn keywords_allowed(&mut self) -> Result<bool, Error> {
+        self.inner.keywords_allowed()
+    }
+
     fn uids(&mut self) -> Result<Vec<Uid>, Error> {
         self.inner.uids()
     }

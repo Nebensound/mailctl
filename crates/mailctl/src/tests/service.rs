@@ -449,8 +449,9 @@ fn every_server_failure_aborts_the_operation() -> Result<(), Error> {
     // select, headers, flag, headers; move: folders, capability, select,
     // headers, (flag,) move, select, uids, and with a Message-ID select,
     // search, headers; create: folders, create, folders; forward: select,
-    // headers, message, flag, headers, append, select, search, headers.
-    assert_eq!(calls, [3, 3, 4, 11, 7, 3, 9]);
+    // headers, keywords, message, folders, flag, headers, append, select,
+    // search, headers.
+    assert_eq!(calls, [3, 3, 4, 11, 7, 3, 11]);
     Ok(())
 }
 
@@ -511,9 +512,10 @@ fn failed_sent_copy_does_not_allow_a_second_forward() -> Result<(), Error> {
         note: None,
         dry_run: false,
     };
-    // Calls: select, headers, message, flag, headers, append (fails).
+    // Calls: select, headers, keywords, message, folders, flag, headers,
+    // append (fails).
     let mut store = FakeStore {
-        fail_at_call: Some(5),
+        fail_at_call: Some(7),
         ..FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])])
     };
     let mut sender = FakeSender::default();
@@ -560,6 +562,113 @@ fn confirmation_compares_the_message_id_exactly() -> Result<(), Error> {
     );
     assert!(
         matches!(&result, Err(Error::NotConfirmed(m)) if m.contains("not found")),
+        "{result:?}"
+    );
+    Ok(())
+}
+
+fn forward_job_parts() -> Result<
+    (
+        MailboxName,
+        MailboxName,
+        EmailAddress,
+        EmailAddress,
+        MessageId,
+        Expect,
+    ),
+    Error,
+> {
+    Ok((
+        folder("INBOX")?,
+        folder("Sent")?,
+        EmailAddress::parse("alice@example.com")?,
+        EmailAddress::parse("accounting@example.com")?,
+        MessageId::parse("fwd@mailctl")?,
+        expect("m2@test")?,
+    ))
+}
+
+#[test]
+fn forward_checks_before_sending() -> Result<(), Error> {
+    let config = crate::testing::config()?;
+    let (inbox, sent, from, to, new_id, by_id) = forward_job_parts()?;
+    let missing = folder("Sent Messages")?;
+    for dry_run in [true, false] {
+        let job = ForwardJob {
+            folder: &inbox,
+            uid: uid(2)?,
+            expect: &by_id,
+            to: &to,
+            from: &from,
+            sent_folder: &missing,
+            new_message_id: &new_id,
+            note: None,
+            dry_run,
+        };
+        let mut store = FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])]);
+        let mut sender = FakeSender::default();
+        assert_eq!(
+            forward(&mut store, &mut sender, &config, &job),
+            Err(Error::FolderMissing("Sent Messages".into())),
+            "dry run: {dry_run}"
+        );
+        assert!(sender.sent.is_empty());
+
+        // A server that forgets $Forwarded could not stop a second forward.
+        let job = ForwardJob {
+            sent_folder: &sent,
+            ..job
+        };
+        let mut forgetful = FakeStore {
+            no_keywords: true,
+            ..FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])])
+        };
+        assert_eq!(
+            forward(&mut forgetful, &mut sender, &config, &job),
+            Err(Error::KeywordsUnsupported("INBOX".into()))
+        );
+        assert!(sender.sent.is_empty());
+        assert_eq!(forgetful.mutations, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn the_sent_copy_does_not_depend_on_the_flag() -> Result<(), Error> {
+    let config = crate::testing::config()?;
+    let (inbox, sent, from, to, new_id, by_id) = forward_job_parts()?;
+    let job = ForwardJob {
+        folder: &inbox,
+        uid: uid(2)?,
+        expect: &by_id,
+        to: &to,
+        from: &from,
+        sent_folder: &sent,
+        new_message_id: &new_id,
+        note: None,
+        dry_run: false,
+    };
+    // The flag is accepted but not kept; the copy is still stored.
+    let mut unflagged = FakeStore {
+        ignore_flags: true,
+        ..FakeStore::with_inbox(vec![mail(2, "a@x", "R", &[])])
+    };
+    let result = forward(&mut unflagged, &mut FakeSender::default(), &config, &job);
+    assert!(
+        matches!(&result, Err(Error::Partial(m)) if m.contains("$Forwarded not set")),
+        "{result:?}"
+    );
+    assert_eq!(unflagged.uids_of("Sent").len(), 1);
+
+    // Both steps fail: both are reported.
+    let mut neither = FakeStore {
+        ignore_flags: true,
+        lose_appends: true,
+        ..FakeStore::with_inbox(vec![mail(2, "a@x", "R", &[])])
+    };
+    let result = forward(&mut neither, &mut FakeSender::default(), &config, &job);
+    assert!(
+        matches!(&result, Err(Error::Partial(m)) if m.contains("$Forwarded not set") && m.contains("not found in Sent")),
         "{result:?}"
     );
     Ok(())

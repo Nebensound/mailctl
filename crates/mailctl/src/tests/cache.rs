@@ -1,0 +1,90 @@
+//! Tests for `cache`.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use super::*;
+use crate::testing::{FakeStore, Shared, folder, mail, uid};
+
+#[test]
+fn lists_folders_and_capabilities_once_per_connection() -> Result<(), Error> {
+    let fake = Rc::new(RefCell::new(FakeStore::with_inbox(vec![
+        mail(2, "a@x", "A", &[]),
+        mail(3, "b@x", "B", &[]),
+    ])));
+    let mut store = CachedStore::new(Box::new(Shared(Rc::clone(&fake))));
+    let target = folder("Work/GitHub")?;
+    for n in [2, 3] {
+        let expect = crate::types::Expect::parse(&format!("m{n}@test"))?;
+        crate::service::move_mail(
+            &mut store,
+            &folder("INBOX")?,
+            uid(n)?,
+            &expect,
+            &target,
+            false,
+            false,
+        )?;
+    }
+    let calls_for_two = fake.borrow().calls.get();
+    // A third move needs no LIST and no CAPABILITY.
+    fake.borrow_mut()
+        .folders
+        .entry("INBOX".into())
+        .or_default()
+        .push(mail(4, "c@x", "C", &[]));
+    let before = fake.borrow().calls.get();
+    crate::service::move_mail(
+        &mut store,
+        &folder("INBOX")?,
+        uid(4)?,
+        &crate::types::Expect::parse("m4@test")?,
+        &target,
+        false,
+        false,
+    )?;
+    let per_move = fake.borrow().calls.get().saturating_sub(before);
+    assert_eq!(
+        calls_for_two,
+        2 * per_move + 2,
+        "LIST and CAPABILITY only once"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_new_folder_is_seen_at_once() -> Result<(), Error> {
+    let mut store = CachedStore::new(Box::new(FakeStore::with_inbox(Vec::new())));
+    let new = folder("New")?;
+    assert!(!store.folders()?.iter().any(|f| f.name == new));
+    store.create_folder(&new)?;
+    assert!(store.folders()?.iter().any(|f| f.name == new));
+    Ok(())
+}
+
+#[test]
+fn passes_everything_else_through() -> Result<(), Error> {
+    let mut store = CachedStore::new(Box::new(FakeStore::with_inbox(vec![mail(
+        2,
+        "a@x",
+        "A",
+        &[],
+    )])));
+    let inbox = folder("INBOX")?;
+    store.select_read_only(&inbox)?;
+    store.select(&inbox)?;
+    assert!(store.keywords_allowed()?);
+    assert_eq!(store.uids()?, vec![uid(2)?]);
+    assert_eq!(store.headers(&[uid(2)?])?.len(), 1);
+    assert!(store.message(uid(2)?)?.is_some());
+    store.add_flags(uid(2)?, &["\\Seen"])?;
+    assert_eq!(
+        store.find_message_id(&MessageId::parse("m2@test")?)?,
+        vec![uid(2)?]
+    );
+    store.append(&folder("Sent")?, b"Message-ID: <x@y>\r\n\r\nx", &[])?;
+    assert!(store.supports_move()?);
+    store.move_to(uid(2)?, &folder("Sent")?)?;
+    assert!(store.uids()?.is_empty());
+    Ok(())
+}

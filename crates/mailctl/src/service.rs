@@ -295,22 +295,35 @@ pub fn create_folder(
     })
 }
 
-/// After sending: flags the original as `$Forwarded`, then stores the copy in
-/// the sent folder, and confirms both.
+/// After sending: flags the original as `$Forwarded` and stores the copy in
+/// the sent folder, and confirms both. The copy does not depend on the flag:
+/// both steps run, and every failure is reported.
 fn record_forward(
     store: &mut dyn MailStore,
     job: &ForwardJob<'_>,
     bytes: &[u8],
 ) -> Result<(), Error> {
+    let flagged = flag_forwarded(store, job);
+    let copied = store
+        .append(job.sent_folder, bytes, &[FLAG_SEEN])
+        .and_then(|()| confirm_in_folder(store, job.sent_folder, job.new_message_id, None));
+    match (flagged, copied) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+        (Err(flag), Err(copy)) => Err(Error::NotConfirmed(format!("{flag}; {copy}"))),
+    }
+}
+
+fn flag_forwarded(store: &mut dyn MailStore, job: &ForwardJob<'_>) -> Result<(), Error> {
     store.add_flags(job.uid, &[FLAG_FORWARDED])?;
-    if !has_flag(&header_of(store, job.uid)?.flags, FLAG_FORWARDED) {
-        return Err(Error::NotConfirmed(format!(
+    if has_flag(&header_of(store, job.uid)?.flags, FLAG_FORWARDED) {
+        Ok(())
+    } else {
+        Err(Error::NotConfirmed(format!(
             "{FLAG_FORWARDED} not set on UID {}",
             job.uid
-        )));
+        )))
     }
-    store.append(job.sent_folder, bytes, &[FLAG_SEEN])?;
-    confirm_in_folder(store, job.sent_folder, job.new_message_id, None)
 }
 
 /// Everything [`forward`] needs besides the connections.
@@ -357,6 +370,9 @@ pub fn forward(
     if mail.flags.forwarded {
         return Err(Error::AlreadyForwarded(job.uid.get()));
     }
+    if !store.keywords_allowed()? {
+        return Err(Error::KeywordsUnsupported(job.folder.to_string()));
+    }
     let original = store
         .message(job.uid)?
         .ok_or(Error::NotFound(job.uid.get()))?;
@@ -367,6 +383,8 @@ pub fn forward(
         note: job.note,
         original: &original.body,
     })?;
+    // Before anything is sent, also in a dry run: the copy must have a place.
+    require_folder(store, job.sent_folder)?;
     let mut confirmed = false;
     if !job.dry_run {
         sender.send(job.from, job.to, &bytes)?;

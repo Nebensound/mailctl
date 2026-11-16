@@ -12,6 +12,7 @@ fn account(name: &str) -> Result<NewAccount, Error> {
         imap_port: 993,
         smtp_host: "mail.example.net".to_owned(),
         smtp_port: 587,
+        smtp_security: Security::StartTls,
         smtp_user: None,
         sent_folder: MailboxName::new("INBOX.Sent")?,
         password: PasswordSource::Keychain("mailctl".to_owned()),

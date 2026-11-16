@@ -7,7 +7,9 @@ use serde::Deserialize;
 use crate::error::Error;
 use crate::types::{EmailAddress, MailboxName};
 
-use crate::types::{IMAPS_PORT as DEFAULT_IMAP_PORT, SUBMISSION_PORT as DEFAULT_SMTP_PORT};
+use crate::types::{
+    IMAPS_PORT as DEFAULT_IMAP_PORT, SUBMISSION_PORT as DEFAULT_SMTP_PORT, Security,
+};
 
 /// The whole configuration file.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -40,6 +42,10 @@ pub struct AccountConfig {
     /// SMTP port (STARTTLS).
     #[serde(default = "default_smtp_port")]
     pub smtp_port: u16,
+    /// SMTP security as discovered: `tls` or `starttls`. Without it, implicit
+    /// TLS on port 465 and STARTTLS on any other port.
+    #[serde(default)]
+    pub smtp_security: Option<Security>,
     /// Separate SMTP login, if it differs from `user`.
     #[serde(default)]
     pub smtp_user: Option<String>,
@@ -123,6 +129,13 @@ impl AccountConfig {
     pub fn smtp_login(&self) -> &str {
         self.smtp_user.as_deref().unwrap_or(&self.user)
     }
+
+    /// The SMTP security to use: as configured, else derived from the port.
+    #[must_use]
+    pub fn smtp_tls(&self) -> Security {
+        self.smtp_security
+            .unwrap_or_else(|| Security::for_smtp_port(self.smtp_port))
+    }
 }
 
 /// Source of an account password.
@@ -167,9 +180,9 @@ impl Secret {
     }
 
     /// Reads the output of `security find-generic-password -w`. `security`
-    /// prints passwords that are not printable ASCII as hex digits, so a
-    /// hex string that decodes to UTF-8 with such characters is decoded; any
-    /// other value is taken as it is.
+    /// prints passwords with non-ASCII bytes as hex digits, so a hex string
+    /// that decodes to UTF-8 with a non-ASCII character is decoded; any other
+    /// value is taken as it is.
     #[must_use]
     pub fn from_keychain_output(raw: &str) -> Self {
         let value = raw.trim_end_matches('\n');
@@ -199,11 +212,12 @@ fn decode_hex_password(value: &str) -> Option<String> {
                 .and_then(|h| u8::from_str_radix(h, 16).ok())
         })
         .collect();
-    let text = String::from_utf8(bytes).ok()?;
-    // `security` prints printable ASCII as it is; a hex form means it was not.
-    text.chars()
-        .any(|c| !(c == ' ' || c.is_ascii_graphic()))
-        .then_some(text)
+    // `security` switches to hex only for non-ASCII bytes; an all-ASCII
+    // result (`123456` → 0x12 0x34 0x56) was printed as it is.
+    if bytes.is_ascii() {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 impl fmt::Debug for Secret {
