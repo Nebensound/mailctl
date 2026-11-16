@@ -1,0 +1,136 @@
+# Self-contained CI: every check of this repository can be reproduced locally.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.97.0"
+
+jobs:
+  lint:
+    name: fmt and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features --locked
+
+  coverage:
+    name: coverage (100% gate)
+    runs-on: ubuntu-latest
+    env:
+      # Nightly for `#[coverage(off)]`: cargo-llvm-cov then sets
+      # `--cfg coverage_nightly`, which leaves out only the marked I/O wrappers.
+      # Pinned to a date, so a new nightly cannot turn CI red on its own; bump
+      # it on purpose. Builds, tests and lints use the stable toolchain.
+      RUSTUP_TOOLCHAIN: nightly-2026-11-14
+      COVERAGE_IGNORE: '(testing\.rs|src/tests/)'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: nightly-2026-11-14
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # Test code (`src/tests/`, `testing.rs`) is not production code; see
+      # "Coverage" in the README.
+      - run: cargo llvm-cov --workspace --all-features --locked --no-report
+      - name: coverage gate
+        run: >-
+          cargo llvm-cov report
+          --ignore-filename-regex "$COVERAGE_IGNORE"
+          --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
+      - name: list uncovered regions
+        if: failure()
+        run: |
+          cargo llvm-cov report --ignore-filename-regex "$COVERAGE_IGNORE" --json --output-path coverage.json
+          python3 - <<'PY'
+          import json
+          data = json.load(open("coverage.json"))["data"][0]
+          # A region counts as covered if any instantiation ran it.
+          counts = {}
+          for function in data["functions"]:
+              for region in function["regions"]:
+                  line, col, end_line, end_col, count, file_id, _, kind = region
+                  if kind != 0:
+                      continue
+                  name = function["filenames"][file_id].split("/src/")[-1]
+                  if name.startswith("tests/") or name == "testing.rs":
+                      continue
+                  key = (name, line, col, end_line, end_col)
+                  counts[key] = max(counts.get(key, 0), count)
+          for item in sorted(k for k, v in counts.items() if v == 0):
+              print("%s:%d:%d-%d:%d" % item)
+          PY
+
+  dependencies:
+    name: licenses and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny check
+
+  release:
+    name: release build and smoke test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: smoke test outside the source tree
+        shell: bash
+        run: |
+          bin="$PWD/target/release/mailctl"
+          cd "$RUNNER_TEMP"
+          "$bin" --version
+          "$bin" ref '<a@example.com>' | grep -q '"mail_ref"'
+          printf '[[accounts]]\nname = "ro"\nuser = "a@example.com"\naddress = "a@example.com"\nimap_host = "127.0.0.1"\nsmtp_host = "127.0.0.1"\nsent_folder = "Sent"\npassword = { env = "PW" }\n' > cfg.toml
+          set +e
+          PW=x "$bin" --config cfg.toml move -a ro --uid 1 --expect 0123456789 --to X > out.json
+          code=$?
+          set -e
+          test "$code" -eq 2
+          grep -q 'is set to `read`' out.json
