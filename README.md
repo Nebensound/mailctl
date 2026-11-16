@@ -8,6 +8,16 @@ it reliably.
 **It never deletes mail.** There is no delete command, and moving refuses to
 fall back to copy-and-expunge on servers without the IMAP `MOVE` extension.
 
+## Installation
+
+Binaries for macOS (Apple Silicon and Intel) and Linux are attached to each
+[GitHub release](https://github.com/Nebensound/mailctl/releases); unpack one
+and put `mailctl` on your `PATH`. With Rust installed:
+
+```sh
+cargo install mailctl --locked
+```
+
 ## Safety model
 
 - Each account has an **access level**, enforced by mailctl itself (see
@@ -266,9 +276,21 @@ release smoke test.
   example GreenMail or Dovecot in a container) in CI, then remove the marks
   from the IMAP and SMTP adapters.
 
+## Releasing
+
+1. Set `version` in `crates/mailctl/Cargo.toml`, merge that to `main`.
+2. Tag the merge commit and push the tag: `git tag v0.1.0 && git push origin v0.1.0`.
+
+The release workflow then checks that the tag matches the version and is on
+`main`, runs the full CI, builds the binaries, creates the GitHub release with
+them and finally publishes the crate to crates.io (a crates.io version can
+never be replaced, so that comes last). It needs the repository secret
+`CARGO_REGISTRY_TOKEN` (a crates.io API token with the `publish-update` and,
+for the first release, `publish-new` scope) in the `crates-io` environment.
+
 ## Status
 
-0.0.3, early prototype. Not yet published on crates.io.
+Early prototype, not yet tested against real mailboxes at scale.
 
 ## License
 
