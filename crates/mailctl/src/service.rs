@@ -208,14 +208,7 @@ fn confirm_in_folder(
     id: &MessageId,
     required_flag: Option<&str>,
 ) -> Result<(), Error> {
-    store.select(folder)?;
-    let candidates = store.find_message_id(id)?;
-    let newest = store
-        .headers(&candidates)?
-        .into_iter()
-        .filter(|h| model::summary_from_header(h).message_id.as_ref() == Some(id))
-        .max_by_key(|h| h.uid);
-    let Some(header) = newest else {
+    let Some(header) = newest_with_id(store, folder, id)? else {
         return Err(Error::NotConfirmed(format!("{id} not found in {folder}")));
     };
     if let Some(flag) = required_flag
@@ -226,6 +219,22 @@ fn confirm_in_folder(
         )));
     }
     Ok(())
+}
+
+/// Selects `folder` and returns the newest mail whose `Message-ID` is exactly
+/// `id` (the server's header search only matches substrings).
+fn newest_with_id(
+    store: &mut dyn MailStore,
+    folder: &MailboxName,
+    id: &MessageId,
+) -> Result<Option<RawHeader>, Error> {
+    store.select(folder)?;
+    let candidates = store.find_message_id(id)?;
+    Ok(store
+        .headers(&candidates)?
+        .into_iter()
+        .filter(|h| model::summary_from_header(h).message_id.as_ref() == Some(id))
+        .max_by_key(|h| h.uid))
 }
 
 /// Moves a mail to another folder of the same account, optionally marking it read first.
@@ -316,9 +325,7 @@ fn record_forward(
 ) -> Result<(), Error> {
     let flagged = flag_forwarded(store, job);
     let copied = match job.sent_folder {
-        Some(sent) => store
-            .append(sent, bytes, &[FLAG_SEEN])
-            .and_then(|()| confirm_in_folder(store, sent, job.new_message_id, None)),
+        Some(sent) => copy_unless_filed(store, sent, job.new_message_id, bytes),
         None => Ok(()),
     };
     match (flagged, copied) {
@@ -326,6 +333,21 @@ fn record_forward(
         (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
         (Err(flag), Err(copy)) => Err(Error::NotConfirmed(format!("{flag}; {copy}"))),
     }
+}
+
+/// Stores the copy in the sent folder, unless the SMTP server has filed one
+/// there itself (as Gmail and Microsoft 365 do), and confirms it.
+fn copy_unless_filed(
+    store: &mut dyn MailStore,
+    sent: &MailboxName,
+    id: &MessageId,
+    bytes: &[u8],
+) -> Result<(), Error> {
+    if newest_with_id(store, sent, id)?.is_some() {
+        return Ok(());
+    }
+    store.append(sent, bytes, &[FLAG_SEEN])?;
+    confirm_in_folder(store, sent, id, None)
 }
 
 fn flag_forwarded(store: &mut dyn MailStore, job: &ForwardJob<'_>) -> Result<(), Error> {

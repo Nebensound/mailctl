@@ -1,5 +1,6 @@
-//! A [`MailStore`] wrapper that remembers the folder list and MOVE support for
-//! one connection, so a long plan does not list all folders for every move.
+//! A [`MailStore`] wrapper for plans: it remembers the folder list and MOVE
+//! support, so a long plan does not list all folders for every move, and it
+//! knows the folders a dry run of the plan would have created.
 
 use crate::error::Error;
 use crate::store::{FolderInfo, MailStore, RawHeader, RawMessage};
@@ -7,31 +8,45 @@ use crate::types::{MailboxName, MessageId, Uid};
 
 /// Caches `folders` and `supports_move`; creating a folder clears the folder
 /// list, so the next call sees the new folder.
-pub struct CachedStore {
-    inner: Box<dyn MailStore>,
+pub struct CachedStore<'a> {
+    inner: &'a mut dyn MailStore,
     folders: Option<Vec<FolderInfo>>,
     supports_move: Option<bool>,
+    /// Folders a dry run "created"; listed as if they existed.
+    assumed: Vec<FolderInfo>,
 }
 
-impl CachedStore {
+impl<'a> CachedStore<'a> {
     /// Wraps a store.
     #[must_use]
-    pub fn new(inner: Box<dyn MailStore>) -> Self {
+    pub fn new(inner: &'a mut dyn MailStore) -> Self {
         Self {
             inner,
             folders: None,
             supports_move: None,
+            assumed: Vec::new(),
         }
+    }
+
+    /// Lists `name` from now on as if it existed: a dry run creates nothing,
+    /// but later operations of the same plan may use the folder.
+    pub fn assume_folder(&mut self, name: &MailboxName) {
+        self.assumed.push(FolderInfo {
+            name: name.clone(),
+            delimiter: None,
+            selectable: true,
+            special_use: None,
+        });
     }
 }
 
-impl MailStore for CachedStore {
+impl MailStore for CachedStore<'_> {
     fn folders(&mut self) -> Result<Vec<FolderInfo>, Error> {
-        if let Some(folders) = &self.folders {
-            return Ok(folders.clone());
+        if self.folders.is_none() {
+            self.folders = Some(self.inner.folders()?);
         }
-        let folders = self.inner.folders()?;
-        self.folders = Some(folders.clone());
+        let mut folders = self.folders.clone().unwrap_or_default();
+        folders.extend(self.assumed.iter().cloned());
         Ok(folders)
     }
 

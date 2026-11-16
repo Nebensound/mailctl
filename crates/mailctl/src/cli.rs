@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-use crate::cache::CachedStore;
 use crate::config::{Access, AccountConfig, Config, Secret, SecretLookup, resolve_password};
 use crate::discover::Net;
 use crate::error::Error;
@@ -366,9 +365,7 @@ impl<'a> Session<'a> {
     }
 
     fn store(&self) -> Result<Box<dyn MailStore>, Error> {
-        let inner = Box::new(CachedStore::new(
-            self.backend.connect(&self.account, &self.secret)?,
-        ));
+        let inner = self.backend.connect(&self.account, &self.secret)?;
         Ok(Box::new(GuardedStore::new(
             inner,
             &self.account.name,

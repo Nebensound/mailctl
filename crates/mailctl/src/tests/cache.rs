@@ -12,7 +12,8 @@ fn lists_folders_and_capabilities_once_per_connection() -> Result<(), Error> {
         mail(2, "a@x", "A", &[]),
         mail(3, "b@x", "B", &[]),
     ])));
-    let mut store = CachedStore::new(Box::new(Shared(Rc::clone(&fake))));
+    let mut shared = Shared(Rc::clone(&fake));
+    let mut store = CachedStore::new(&mut shared);
     let target = folder("Work/GitHub")?;
     for n in [2, 3] {
         let expect = crate::types::Expect::parse(&format!("m{n}@test"))?;
@@ -54,7 +55,8 @@ fn lists_folders_and_capabilities_once_per_connection() -> Result<(), Error> {
 
 #[test]
 fn a_new_folder_is_seen_at_once() -> Result<(), Error> {
-    let mut store = CachedStore::new(Box::new(FakeStore::with_inbox(Vec::new())));
+    let mut inner = FakeStore::with_inbox(Vec::new());
+    let mut store = CachedStore::new(&mut inner);
     let new = folder("New")?;
     assert!(!store.folders()?.iter().any(|f| f.name == new));
     store.create_folder(&new)?;
@@ -64,12 +66,8 @@ fn a_new_folder_is_seen_at_once() -> Result<(), Error> {
 
 #[test]
 fn passes_everything_else_through() -> Result<(), Error> {
-    let mut store = CachedStore::new(Box::new(FakeStore::with_inbox(vec![mail(
-        2,
-        "a@x",
-        "A",
-        &[],
-    )])));
+    let mut inner = FakeStore::with_inbox(vec![mail(2, "a@x", "A", &[])]);
+    let mut store = CachedStore::new(&mut inner);
     let inbox = folder("INBOX")?;
     store.select_read_only(&inbox)?;
     store.select(&inbox)?;
@@ -86,5 +84,23 @@ fn passes_everything_else_through() -> Result<(), Error> {
     assert!(store.supports_move()?);
     store.move_to(uid(2)?, &folder("Sent")?)?;
     assert!(store.uids()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn assumed_folders_are_listed_until_the_end() -> Result<(), Error> {
+    let mut inner = FakeStore::with_inbox(Vec::new());
+    let mut store = CachedStore::new(&mut inner);
+    let planned = folder("Invoices")?;
+    store.assume_folder(&planned);
+    assert!(store.folders()?.iter().any(|f| f.name == planned));
+    // Also after the real list was reloaded.
+    store.create_folder(&folder("Other")?)?;
+    let names: Vec<String> = store
+        .folders()?
+        .iter()
+        .map(|f| f.name.to_string())
+        .collect();
+    assert!(names.contains(&"Invoices".to_owned()) && names.contains(&"Other".to_owned()));
     Ok(())
 }

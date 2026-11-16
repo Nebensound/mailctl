@@ -17,11 +17,17 @@ fall back to copy-and-expunge on servers without the IMAP `MOVE` extension.
   `Message-ID` or the ten-digit mail reference. If the mail at that UID is a
   different one, nothing happens.
 - Every change is read back from the server afterwards (`"confirmed": true`).
+  A move of a mail without `Message-ID` is checked only in the source folder
+  (the mail is gone there) and reports `"confirmed": false`: it cannot be
+  identified in the target.
 - `--dry-run` checks everything and changes nothing; plans support
   `"dry_run": true`.
 - `forward` only sends to addresses in `forward_allowlist`, refuses mails that
   already carry `$Forwarded`, stores a copy in the sent folder and sets
-  `$Forwarded` on the original.
+  `$Forwarded` on the original. It refuses folders whose `PERMANENTFLAGS` do
+  not allow keywords; a server that sends no `PERMANENTFLAGS` at all counts as
+  allowing them (RFC 3501). If the flag still does not stick, the forward is
+  reported as `partly done`: do not repeat it.
 
 ## Access levels
 
@@ -103,9 +109,10 @@ Host names and sent folders above are examples; check them with
 `smtp_security = "starttls"` or `"tls"`; `account add` stores what discovery
 found, and without the key port 465 means TLS and any other port STARTTLS.
 Folder names that are not valid IMAP modified UTF-7 are left out of listings.
-`save_sent_copy = false` stops mailctl from storing its own copy of forwards in
-the sent folder; `account add` sets it for Gmail and Microsoft 365, whose SMTP
-servers file sent mail themselves.
+Before storing its copy of a forward in the sent folder, mailctl looks for one
+the SMTP server filed itself. Because such a copy can appear with a delay,
+`save_sent_copy = false` turns the own copy off completely; `account add` sets
+it for Gmail and Microsoft 365, which always file sent mail.
 
 Passwords come from the macOS keychain (`password = { keychain = "<service>" }`;
 the item's account is the mailctl account name, so two accounts with the same
@@ -219,7 +226,7 @@ source tree.
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --locked --all-features
-cargo +nightly llvm-cov --workspace --ignore-filename-regex '(testing\.rs|src/tests/)' \
+cargo +nightly-2026-11-14 llvm-cov --workspace --ignore-filename-regex '(testing\.rs|src/tests/)' \
   --fail-under-lines 100 --fail-under-regions 100 --fail-under-functions 100
 cargo build --release
 ```
@@ -232,7 +239,8 @@ translate to IMAP, SMTP, files, environment and keychain.
 ## Coverage
 
 This project requires 100% test coverage of its production code (regions,
-lines and functions), measured with `cargo llvm-cov` on nightly. Unit tests
+lines and functions), measured with `cargo llvm-cov` on a pinned nightly
+(only the coverage job; everything else builds on stable). Unit tests
 live in `src/tests/` and the fakes in `src/testing.rs`; both are test code and
 are not counted.
 

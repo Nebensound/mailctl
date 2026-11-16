@@ -451,9 +451,10 @@ fn every_server_failure_aborts_the_operation() -> Result<(), Error> {
     // select, headers, flag, headers; move: folders, capability, select,
     // headers, (flag,) move, headers of the UID, and with a Message-ID
     // select, search, headers; create: folders, create, folders; forward: select,
-    // headers, keywords, message, folders, flag, headers, append, select,
-    // search, headers.
-    assert_eq!(calls, [3, 3, 4, 10, 6, 3, 11]);
+    // headers, keywords, message, folders, flag, headers, then in Sent select,
+    // search, headers (no copy filed by the server), append, select, search,
+    // headers.
+    assert_eq!(calls, [3, 3, 4, 10, 6, 3, 14]);
     Ok(())
 }
 
@@ -515,9 +516,9 @@ fn failed_sent_copy_does_not_allow_a_second_forward() -> Result<(), Error> {
         dry_run: false,
     };
     // Calls: select, headers, keywords, message, folders, flag, headers,
-    // append (fails).
+    // select, search, headers, append (fails).
     let mut store = FakeStore {
-        fail_at_call: Some(7),
+        fail_at_call: Some(10),
         ..FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])])
     };
     let mut sender = FakeSender::default();
@@ -744,5 +745,37 @@ fn mismatches_report_the_same_kind_of_value() -> Result<(), Error> {
             found: "no Message-ID".into(),
         })
     );
+    Ok(())
+}
+
+#[test]
+fn a_copy_the_server_filed_itself_is_not_stored_again() -> Result<(), Error> {
+    let config = crate::testing::config()?;
+    let (inbox, sent, from, to, new_id, by_id) = forward_job_parts()?;
+    let job = ForwardJob {
+        folder: &inbox,
+        uid: uid(2)?,
+        expect: &by_id,
+        to: &to,
+        from: &from,
+        sent_folder: Some(&sent),
+        new_message_id: &new_id,
+        note: None,
+        dry_run: false,
+    };
+    let mut store = FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])]);
+    // What a server that files submissions itself leaves in Sent.
+    store
+        .folders
+        .entry("Sent".into())
+        .or_default()
+        .push(FakeStore::raw_mail(
+            90,
+            b"Message-ID: <fwd@mailctl>\r\nSubject: Fwd: Invoice\r\n\r\nx".to_vec(),
+            &[],
+        ));
+    let report = forward(&mut store, &mut FakeSender::default(), &config, &job)?;
+    assert!(report.confirmed);
+    assert_eq!(store.uids_of("Sent").len(), 1);
     Ok(())
 }

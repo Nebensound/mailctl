@@ -112,29 +112,3 @@ fn dry_runs_know_folders_created_earlier_in_the_plan() -> Result<(), Error> {
     assert!(!store.folders.contains_key("Invoices"));
     Ok(())
 }
-
-#[test]
-fn the_plan_store_passes_everything_through() -> Result<(), Error> {
-    let mut inner = FakeStore::with_inbox(vec![mail(2, "a@x", "A", &[])]);
-    let mut store = PlannedFolders {
-        inner: &mut inner,
-        planned: Vec::new(),
-    };
-    let inbox = MailboxName::inbox();
-    let uid = Uid::new(2)?;
-    store.select_read_only(&inbox)?;
-    store.select(&inbox)?;
-    assert!(store.keywords_allowed()?);
-    assert_eq!(store.uids()?, vec![uid]);
-    assert!(store.message(uid)?.is_some());
-    assert_eq!(
-        store.find_message_id(&MessageId::parse("m2@test")?)?,
-        vec![uid]
-    );
-    let sent = MailboxName::new("Sent")?;
-    store.append(&sent, b"Message-ID: <x@y>\r\n\r\nx", &[])?;
-    let new = MailboxName::new("New")?;
-    store.create_folder(&new)?;
-    assert!(store.folders()?.iter().any(|f| f.name == new));
-    Ok(())
-}
