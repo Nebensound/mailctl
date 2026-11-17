@@ -1,6 +1,6 @@
 [package]
 name = "mailctl"
-version = "0.1.0"
+version = "0.1.1"
 description = "Safe, agent-friendly IMAP/SMTP command line tool for sorting mailboxes: per-account access levels, verified changes, no delete."
 edition.workspace = true
 rust-version.workspace = true
@@ -20,9 +20,9 @@ name = "mailctl"
 path = "src/main.rs"
 
 [dependencies]
+async-imap.workspace = true
 clap.workspace = true
-imap.workspace = true
-imap-proto.workspace = true
+futures-util.workspace = true
 lettre.workspace = true
 hickory-resolver.workspace = true
 mail-parser.workspace = true
@@ -30,6 +30,7 @@ native-tls.workspace = true
 roxmltree.workspace = true
 rpassword.workspace = true
 tokio.workspace = true
+tokio-native-tls.workspace = true
 toml_edit.workspace = true
 ureq.workspace = true
 serde.workspace = true

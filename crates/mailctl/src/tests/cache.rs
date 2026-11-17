@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::*;
+use crate::store::FLAG_DELETED;
 use crate::testing::{FakeStore, Shared, folder, mail, uid};
 
 #[test]
@@ -81,9 +82,20 @@ fn passes_everything_else_through() -> Result<(), Error> {
         vec![uid(2)?]
     );
     store.append(&folder("Sent")?, b"Message-ID: <x@y>\r\n\r\nx", &[])?;
-    assert!(store.supports_move()?);
-    store.move_to(uid(2)?, &folder("Sent")?)?;
+    assert_eq!(store.move_support()?, MoveSupport::Move);
+    // Second call comes from the cache: a failing inner store is not asked.
+    assert_eq!(store.move_support()?, MoveSupport::Move);
+    store.remove_flags(uid(2)?, &["\\Seen"])?;
+    store.copy_to(uid(2)?, &folder("Sent")?)?;
+    store.add_flags(uid(2)?, &[FLAG_DELETED])?;
+    assert_eq!(store.deleted_uids()?, vec![uid(2)?]);
+    store.expunge_uid(uid(2)?)?;
+    store.expunge_all_deleted()?;
     assert!(store.uids()?.is_empty());
+    assert_eq!(
+        store.move_to(uid(2)?, &folder("Sent")?),
+        Err(Error::NotFound(2))
+    );
     Ok(())
 }
 

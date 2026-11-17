@@ -5,8 +5,11 @@ lists, shows, moves, marks read, creates folders and forwards to an allow
 list. Every command prints JSON on stdout, so scripts and AI agents can drive
 it reliably.
 
-**It never deletes mail.** There is no delete command, and moving refuses to
-fall back to copy-and-expunge on servers without the IMAP `MOVE` extension.
+**It never deletes mail.** There is no delete command. On servers without the
+IMAP `MOVE` extension (iCloud, for example) a move copies the mail and removes
+the original only after its copy is confirmed in the target folder, and,
+without `UIDPLUS`, only when no other mail in the folder is marked for
+deletion (checked right before `EXPUNGE`; see below).
 
 ## Installation
 
@@ -34,6 +37,19 @@ cargo install mailctl --locked
   A move of a mail without `Message-ID` is checked only in the source folder
   (the mail is gone there) and reports `"confirmed": false`: it cannot be
   identified in the target.
+- Servers without `MOVE`: the mail is copied, the copy is confirmed in the
+  target by `Message-ID`, and only then is the original marked `\Deleted` and
+  removed. With `UIDPLUS` exactly this mail is removed (`UID EXPUNGE`). Without
+  `UIDPLUS` a plain `EXPUNGE` would remove every marked mail in the folder, so
+  mailctl refuses the move while any other mail there is marked `\Deleted`,
+  and checks again right before `EXPUNGE`; if another client marked one in
+  between, it takes its own mark back and reports `partly done` (the copy is
+  in the target, the original still in the source). One server round trip
+  remains between that check and `EXPUNGE`. Mails without `Message-ID` cannot
+  be moved this way, because their copy cannot be confirmed. The copy must be
+  a new mail in the target: an existing mail with the same `Message-ID` (a CC
+  to yourself and the list copy share one) is never taken as the copy, so a
+  retry after an interruption leaves a duplicate rather than losing a mail.
 - `--dry-run` checks everything and changes nothing; plans support
   `"dry_run": true`.
 - `forward` only sends to addresses in `forward_allowlist`, refuses mails that

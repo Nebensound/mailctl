@@ -10,7 +10,9 @@ use crate::config::{AccountConfig, Config, Secret, SecretLookup};
 use crate::discover::Net;
 use crate::discover::tests::FakeNet;
 use crate::error::Error;
-use crate::store::{FolderInfo, MailSender, MailStore, RawHeader, RawMessage};
+use crate::store::{
+    FLAG_DELETED, FolderInfo, MailSender, MailStore, MoveSupport, RawHeader, RawMessage,
+};
 use crate::types::{EmailAddress, MailboxName, MessageId, Uid};
 
 /// One stored mail.
@@ -35,9 +37,13 @@ pub(crate) struct FakeStore {
     pub(crate) noselect: Vec<String>,
     pub(crate) selected: Option<String>,
     pub(crate) next_uid: u32,
-    pub(crate) move_supported: bool,
+    pub(crate) move_support: MoveSupport,
     pub(crate) ignore_flags: bool,
     pub(crate) lose_moves: bool,
+    /// `COPY` succeeds but no copy arrives.
+    pub(crate) lose_copies: bool,
+    /// When a mail gets `\Deleted`, another client marks this UID too.
+    pub(crate) race_deleted: Option<u32>,
     pub(crate) stuck_moves: bool,
     pub(crate) ignore_creates: bool,
     pub(crate) hide_bodies: bool,
@@ -45,6 +51,8 @@ pub(crate) struct FakeStore {
     pub(crate) fail_all: bool,
     /// The server forgets custom keywords such as `$Forwarded`.
     pub(crate) no_keywords: bool,
+    /// The header search never matches, as on iCloud.
+    pub(crate) no_header_search: bool,
     /// Fail the store call with this zero-based number (and only that one).
     pub(crate) fail_at_call: Option<usize>,
     /// Number of store calls so far.
@@ -115,15 +123,18 @@ impl FakeStore {
             noselect: vec!["Noselect".to_owned()],
             selected: None,
             next_uid,
-            move_supported: true,
+            move_support: MoveSupport::Move,
             ignore_flags: false,
             lose_moves: false,
+            lose_copies: false,
+            race_deleted: None,
             stuck_moves: false,
             ignore_creates: false,
             hide_bodies: false,
             lose_appends: false,
             fail_all: false,
             no_keywords: false,
+            no_header_search: false,
             fail_at_call: None,
             calls: Cell::new(0),
             read_only: false,
@@ -283,6 +294,12 @@ impl MailStore for FakeStore {
             return Ok(());
         }
         let keep_keywords = !self.no_keywords;
+        let race = self.race_deleted.filter(|_| flags.contains(&FLAG_DELETED));
+        if let Some(other) = race
+            && let Some(m) = self.current()?.iter_mut().find(|m| m.uid == other)
+        {
+            m.flags.push(FLAG_DELETED.to_owned());
+        }
         if let Some(m) = self.current()?.iter_mut().find(|m| m.uid == uid.get()) {
             for flag in flags
                 .iter()
@@ -296,9 +313,61 @@ impl MailStore for FakeStore {
         Ok(())
     }
 
-    fn supports_move(&mut self) -> Result<bool, Error> {
+    fn remove_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error> {
         self.check()?;
-        Ok(self.move_supported)
+        self.mutate()?;
+        if let Some(m) = self.current()?.iter_mut().find(|m| m.uid == uid.get()) {
+            m.flags.retain(|f| !flags.contains(&f.as_str()));
+        }
+        Ok(())
+    }
+
+    fn move_support(&mut self) -> Result<MoveSupport, Error> {
+        self.check()?;
+        Ok(self.move_support)
+    }
+
+    fn copy_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
+        self.check()?;
+        self.mutate()?;
+        let Some(mut copy) = self.current()?.iter().find(|m| m.uid == uid.get()).cloned() else {
+            return Err(Error::NotFound(uid.get()));
+        };
+        if self.lose_copies {
+            return Ok(());
+        }
+        copy.uid = self.next();
+        self.folders
+            .get_mut(target.as_str())
+            .ok_or_else(|| Error::Store(format!("no such folder {target}")))?
+            .push(copy);
+        Ok(())
+    }
+
+    fn deleted_uids(&mut self) -> Result<Vec<Uid>, Error> {
+        self.check()?;
+        Ok(self
+            .current()?
+            .iter()
+            .filter(|m| m.flags.iter().any(|f| f == FLAG_DELETED))
+            .filter_map(|m| Uid::new(m.uid).ok())
+            .collect())
+    }
+
+    fn expunge_uid(&mut self, uid: Uid) -> Result<(), Error> {
+        self.check()?;
+        self.mutate()?;
+        self.current()?
+            .retain(|m| m.uid != uid.get() || !m.flags.iter().any(|f| f == FLAG_DELETED));
+        Ok(())
+    }
+
+    fn expunge_all_deleted(&mut self) -> Result<(), Error> {
+        self.check()?;
+        self.mutate()?;
+        self.current()?
+            .retain(|m| !m.flags.iter().any(|f| f == FLAG_DELETED));
+        Ok(())
     }
 
     fn move_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
@@ -325,6 +394,9 @@ impl MailStore for FakeStore {
 
     fn find_message_id(&mut self, id: &MessageId) -> Result<Vec<Uid>, Error> {
         self.check()?;
+        if self.no_header_search {
+            return Ok(Vec::new());
+        }
         let needle = format!("<{id}>");
         Ok(self
             .current()?
@@ -391,8 +463,23 @@ impl MailStore for Shared {
     fn add_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error> {
         self.0.borrow_mut().add_flags(uid, flags)
     }
-    fn supports_move(&mut self) -> Result<bool, Error> {
-        self.0.borrow_mut().supports_move()
+    fn remove_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error> {
+        self.0.borrow_mut().remove_flags(uid, flags)
+    }
+    fn move_support(&mut self) -> Result<MoveSupport, Error> {
+        self.0.borrow_mut().move_support()
+    }
+    fn copy_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
+        self.0.borrow_mut().copy_to(uid, target)
+    }
+    fn deleted_uids(&mut self) -> Result<Vec<Uid>, Error> {
+        self.0.borrow_mut().deleted_uids()
+    }
+    fn expunge_uid(&mut self, uid: Uid) -> Result<(), Error> {
+        self.0.borrow_mut().expunge_uid(uid)
+    }
+    fn expunge_all_deleted(&mut self) -> Result<(), Error> {
+        self.0.borrow_mut().expunge_all_deleted()
     }
     fn move_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
         self.0.borrow_mut().move_to(uid, target)
@@ -418,6 +505,9 @@ impl MailStore for Shared {
 pub(crate) struct FakeSender {
     pub(crate) sent: Vec<(EmailAddress, Vec<u8>)>,
     pub(crate) fail: bool,
+    /// The SMTP server files each submission into this folder of this
+    /// store itself, as Gmail and Microsoft 365 do.
+    pub(crate) files_into: Option<(Rc<RefCell<FakeStore>>, MailboxName)>,
 }
 
 impl MailSender for FakeSender {
@@ -431,6 +521,9 @@ impl MailSender for FakeSender {
             return Err(Error::Send("simulated failure".into()));
         }
         self.sent.push((to.clone(), message.to_vec()));
+        if let Some((store, folder)) = &self.files_into {
+            store.borrow_mut().append(folder, message, &[])?;
+        }
         Ok(())
     }
 }
