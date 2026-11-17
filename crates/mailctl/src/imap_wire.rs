@@ -1,26 +1,34 @@
 //! Pure IMAP wire helpers used by the IMAP adapter: flag and folder
-//! attribute mapping, UID sets, keyword support and APPEND quoting.
+//! attribute mapping, UID sets, keyword support, SELECT completion and
+//! mailbox quoting.
 
-use std::borrow::Cow;
-
-use ::imap::types::Flag;
-use imap_proto::NameAttribute;
+use async_imap::imap_proto::{RequestId, Response, ResponseCode, Status};
+use async_imap::types::{Flag, NameAttribute};
 
 use crate::store::FLAG_FORWARDED;
 use crate::types::{MailboxName, Uid};
 use crate::utf7;
 
-/// The imap crate's flag for a flag name; anything not a system flag is a
-/// keyword.
+/// The IMAP name of a flag as the server sent it, e.g. `\Seen` or
+/// `$Forwarded`.
 #[must_use]
-pub fn flag_of(name: &str) -> Flag<'static> {
-    match name {
-        "\\Seen" => Flag::Seen,
-        "\\Answered" => Flag::Answered,
-        "\\Flagged" => Flag::Flagged,
-        "\\Draft" => Flag::Draft,
-        other => Flag::Custom(Cow::Owned(other.to_owned())),
+pub fn flag_name(flag: &Flag<'_>) -> String {
+    match flag {
+        Flag::Seen => "\\Seen".to_owned(),
+        Flag::Answered => "\\Answered".to_owned(),
+        Flag::Flagged => "\\Flagged".to_owned(),
+        Flag::Deleted => "\\Deleted".to_owned(),
+        Flag::Draft => "\\Draft".to_owned(),
+        Flag::Recent => "\\Recent".to_owned(),
+        Flag::MayCreate => "\\*".to_owned(),
+        Flag::Custom(name) => name.to_string(),
     }
+}
+
+/// A parenthesized flag list for STORE and APPEND: `(\Seen $Forwarded)`.
+#[must_use]
+pub fn flag_list(flags: &[&str]) -> String {
+    format!("({})", flags.join(" "))
 }
 
 /// The RFC 6154 special-use name of a folder attribute, if it is one.
@@ -48,34 +56,99 @@ pub fn uid_set(uids: &[Uid]) -> String {
         .join(",")
 }
 
-/// Whether a folder keeps custom keywords such as `$Forwarded`, judged from
-/// the raw SELECT response. Without a `PERMANENTFLAGS` code RFC 3501 says
-/// all flags are permanent; an explicit `PERMANENTFLAGS ()` means none is.
-/// (The imap crate reports both as an empty list, hence the raw response.)
-/// Keywords compare case-insensitively.
-#[must_use]
-pub fn keywords_allowed(select_response: &[u8]) -> bool {
-    let text = String::from_utf8_lossy(select_response);
-    let upper = text.to_ascii_uppercase();
-    let Some(start) = upper.find("[PERMANENTFLAGS (") else {
-        return true;
-    };
-    let list = text
-        .get(start.saturating_add("[PERMANENTFLAGS (".len())..)
-        .and_then(|rest| rest.split(')').next())
-        .unwrap_or_default();
-    list.split_whitespace()
-        .any(|f| f == "\\*" || f.eq_ignore_ascii_case(FLAG_FORWARDED))
+/// Follows the responses to a raw SELECT up to its tagged completion and
+/// judges from them whether the folder keeps custom keywords.
+#[derive(Debug)]
+pub struct SelectReader {
+    /// The tag of the SELECT command.
+    tag: RequestId,
+    /// The last `PERMANENTFLAGS` code seen, if any.
+    permanent: Option<Vec<String>>,
 }
 
-/// A mailbox name as an IMAP quoted string's content: modified UTF-7, with
-/// `\\` and `"` escaped. The imap crate writes APPEND's mailbox between
-/// quotes as it is, and the raw SELECT needs the same.
+impl SelectReader {
+    /// Starts following the SELECT command tagged `tag`.
+    #[must_use]
+    pub fn new(tag: RequestId) -> Self {
+        Self {
+            tag,
+            permanent: None,
+        }
+    }
+
+    /// Takes the next server response: `None` while SELECT is still running,
+    /// then whether the folder keeps keywords, or why SELECT failed.
+    pub fn feed(&mut self, response: &Response<'_>) -> Option<Result<bool, String>> {
+        if let Some(flags) = permanent_flags(response) {
+            self.permanent = Some(flags);
+        }
+        command_done(response, &self.tag)
+            .map(|done| done.map(|()| keywords_allowed(self.permanent.as_deref())))
+    }
+}
+
+/// The flags of a `PERMANENTFLAGS` response code, if `response` carries one.
+fn permanent_flags(response: &Response<'_>) -> Option<Vec<String>> {
+    let (Response::Data { outcome, .. } | Response::Done { outcome, .. }) = response else {
+        return None;
+    };
+    match &outcome.code {
+        Some(ResponseCode::PermanentFlags(flags)) => {
+            Some(flags.iter().map(ToString::to_string).collect())
+        }
+        _ => None,
+    }
+}
+
+/// Whether a folder keeps custom keywords such as `$Forwarded`, judged from
+/// the `PERMANENTFLAGS` code of its SELECT response. Without the code
+/// (`None`) RFC 3501 says all flags are permanent; an explicit empty list
+/// means none is. (The parsed mailbox of `async-imap` reports both as an
+/// empty list, hence the adapter reads the responses itself.) Keywords
+/// compare case-insensitively.
+fn keywords_allowed(permanent: Option<&[String]>) -> bool {
+    permanent.is_none_or(|flags| {
+        flags
+            .iter()
+            .any(|f| f == "\\*" || f.eq_ignore_ascii_case(FLAG_FORWARDED))
+    })
+}
+
+/// How a response ends the command tagged `tag`: `None` while the command
+/// is still running, `Some(Ok(()))` when it completed, `Some(Err(reason))`
+/// when the server refused it or closed the connection.
+fn command_done(response: &Response<'_>, tag: &RequestId) -> Option<Result<(), String>> {
+    match response {
+        Response::Done {
+            tag: done,
+            status,
+            outcome,
+        } if done == tag => Some(match status {
+            Status::Ok => Ok(()),
+            _ => Err(format!(
+                "{status:?}: {}",
+                outcome.information.as_deref().unwrap_or_default()
+            )),
+        }),
+        Response::Data {
+            status: Status::Bye,
+            outcome,
+        } => Some(Err(format!(
+            "server closed the connection: {}",
+            outcome.information.as_deref().unwrap_or_default()
+        ))),
+        _ => None,
+    }
+}
+
+/// A mailbox name as an IMAP quoted string: modified UTF-7 between quotes,
+/// with `\` and `"` escaped. Needed for the raw SELECT command.
 #[must_use]
-pub fn append_mailbox(folder: &MailboxName) -> String {
-    utf7::encode(folder.as_str())
+pub fn quoted_mailbox(folder: &MailboxName) -> String {
+    let encoded = utf7::encode(folder.as_str())
         .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+        .replace('"', "\\\"");
+    format!("\"{encoded}\"")
 }
 
 #[cfg(test)]

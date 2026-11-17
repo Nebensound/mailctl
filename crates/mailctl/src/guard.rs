@@ -7,7 +7,7 @@
 
 use crate::config::Access;
 use crate::error::Error;
-use crate::store::{FolderInfo, MailStore, RawHeader, RawMessage};
+use crate::store::{FolderInfo, MailStore, MoveSupport, RawHeader, RawMessage};
 use crate::types::{MailboxName, MessageId, Uid};
 
 /// A [`MailStore`] that only lets through what the access level allows.
@@ -71,8 +71,32 @@ impl MailStore for GuardedStore {
         self.inner.add_flags(uid, flags)
     }
 
-    fn supports_move(&mut self) -> Result<bool, Error> {
-        self.inner.supports_move()
+    fn remove_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error> {
+        self.require(Access::Flag)?;
+        self.inner.remove_flags(uid, flags)
+    }
+
+    fn move_support(&mut self) -> Result<MoveSupport, Error> {
+        self.inner.move_support()
+    }
+
+    fn copy_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
+        self.require(Access::Organize)?;
+        self.inner.copy_to(uid, target)
+    }
+
+    fn deleted_uids(&mut self) -> Result<Vec<Uid>, Error> {
+        self.inner.deleted_uids()
+    }
+
+    fn expunge_uid(&mut self, uid: Uid) -> Result<(), Error> {
+        self.require(Access::Organize)?;
+        self.inner.expunge_uid(uid)
+    }
+
+    fn expunge_all_deleted(&mut self) -> Result<(), Error> {
+        self.require(Access::Organize)?;
+        self.inner.expunge_all_deleted()
     }
 
     fn move_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
