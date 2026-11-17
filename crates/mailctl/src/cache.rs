@@ -1,17 +1,17 @@
-//! A [`MailStore`] wrapper for plans: it remembers the folder list and MOVE
+//! A [`MailStore`] wrapper for plans: it remembers the folder list and move
 //! support, so a long plan does not list all folders for every move, and it
 //! knows the folders a dry run of the plan would have created.
 
 use crate::error::Error;
-use crate::store::{FolderInfo, MailStore, RawHeader, RawMessage};
+use crate::store::{FolderInfo, MailStore, MoveSupport, RawHeader, RawMessage};
 use crate::types::{MailboxName, MessageId, Uid};
 
-/// Caches `folders` and `supports_move`; creating a folder clears the folder
+/// Caches `folders` and `move_support`; creating a folder clears the folder
 /// list, so the next call sees the new folder.
 pub struct CachedStore<'a> {
     inner: &'a mut dyn MailStore,
     folders: Option<Vec<FolderInfo>>,
-    supports_move: Option<bool>,
+    move_support: Option<MoveSupport>,
     /// Folders a dry run "created"; listed as if they existed.
     assumed: Vec<FolderInfo>,
 }
@@ -23,7 +23,7 @@ impl<'a> CachedStore<'a> {
         Self {
             inner,
             folders: None,
-            supports_move: None,
+            move_support: None,
             assumed: Vec::new(),
         }
     }
@@ -78,13 +78,33 @@ impl MailStore for CachedStore<'_> {
         self.inner.add_flags(uid, flags)
     }
 
-    fn supports_move(&mut self) -> Result<bool, Error> {
-        if let Some(supported) = self.supports_move {
-            return Ok(supported);
+    fn remove_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error> {
+        self.inner.remove_flags(uid, flags)
+    }
+
+    fn move_support(&mut self) -> Result<MoveSupport, Error> {
+        if let Some(support) = self.move_support {
+            return Ok(support);
         }
-        let supported = self.inner.supports_move()?;
-        self.supports_move = Some(supported);
-        Ok(supported)
+        let support = self.inner.move_support()?;
+        self.move_support = Some(support);
+        Ok(support)
+    }
+
+    fn copy_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
+        self.inner.copy_to(uid, target)
+    }
+
+    fn deleted_uids(&mut self) -> Result<Vec<Uid>, Error> {
+        self.inner.deleted_uids()
+    }
+
+    fn expunge_uid(&mut self, uid: Uid) -> Result<(), Error> {
+        self.inner.expunge_uid(uid)
+    }
+
+    fn expunge_all_deleted(&mut self) -> Result<(), Error> {
+        self.inner.expunge_all_deleted()
     }
 
     fn move_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {

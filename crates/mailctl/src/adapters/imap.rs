@@ -8,7 +8,7 @@ use crate::adapters::net::connect_any;
 use crate::config::{AccountConfig, Secret};
 use crate::error::Error;
 use crate::imap_wire::{append_mailbox, flag_of, keywords_allowed, special_use, uid_set};
-use crate::store::{FolderInfo, MailStore, RawHeader, RawMessage};
+use crate::store::{FolderInfo, MailStore, MoveSupport, RawHeader, RawMessage};
 use crate::types::{MailboxName, MessageId, Uid};
 use crate::utf7;
 
@@ -174,12 +174,51 @@ impl MailStore for ImapStore {
             .map_err(store_err)
     }
 
-    fn supports_move(&mut self) -> Result<bool, Error> {
-        Ok(self
-            .session
-            .capabilities()
+    fn remove_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error> {
+        self.session
+            .uid_store(
+                uid.to_string(),
+                format!("-FLAGS.SILENT ({})", flags.join(" ")),
+            )
+            .map(|_| ())
+            .map_err(store_err)
+    }
+
+    fn move_support(&mut self) -> Result<MoveSupport, Error> {
+        let caps = self.session.capabilities().map_err(store_err)?;
+        Ok(if caps.has_str("MOVE") {
+            MoveSupport::Move
+        } else if caps.has_str("UIDPLUS") {
+            MoveSupport::CopyUidExpunge
+        } else {
+            MoveSupport::CopyExpunge
+        })
+    }
+
+    fn copy_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
+        self.session
+            .uid_copy(uid.to_string(), utf7::encode(target.as_str()))
+            .map_err(store_err)
+    }
+
+    fn deleted_uids(&mut self) -> Result<Vec<Uid>, Error> {
+        self.session
+            .uid_search("DELETED")
             .map_err(store_err)?
-            .has_str("MOVE"))
+            .into_iter()
+            .map(Uid::new)
+            .collect()
+    }
+
+    fn expunge_uid(&mut self, uid: Uid) -> Result<(), Error> {
+        self.session
+            .uid_expunge(uid.to_string())
+            .map(|_| ())
+            .map_err(store_err)
+    }
+
+    fn expunge_all_deleted(&mut self) -> Result<(), Error> {
+        self.session.expunge().map(|_| ()).map_err(store_err)
     }
 
     fn move_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {

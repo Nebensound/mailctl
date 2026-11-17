@@ -8,7 +8,8 @@ use crate::error::Error;
 use crate::forward::{self, ForwardRequest};
 use crate::model::{self, MailDetail, MailSummary};
 use crate::store::{
-    FLAG_FORWARDED, FLAG_SEEN, FolderInfo, MailSender, MailStore, RawHeader, has_flag,
+    FLAG_DELETED, FLAG_FORWARDED, FLAG_SEEN, FolderInfo, MailSender, MailStore, MoveSupport,
+    RawHeader, has_flag,
 };
 use crate::types::{EmailAddress, Expect, MailboxName, MessageId, Uid};
 
@@ -249,9 +250,16 @@ fn newest_with_id(
 
 /// Moves a mail to another folder of the same account, optionally marking it read first.
 ///
+/// Servers without `MOVE` get a copy, which is confirmed in the target before
+/// the original is marked `\Deleted` and removed: with `UIDPLUS` exactly this
+/// mail (`UID EXPUNGE`), otherwise with a plain `EXPUNGE` only when no other
+/// mail in the folder is marked.
+///
 /// # Errors
-/// [`Error::FolderMissing`], [`Error::MoveUnsupported`], [`Error::NotFound`],
-/// [`Error::MessageIdMismatch`], [`Error::NotConfirmed`] or server errors.
+/// [`Error::FolderMissing`], [`Error::MoveUnsupported`],
+/// [`Error::OthersMarkedDeleted`], [`Error::NotFound`],
+/// [`Error::MessageIdMismatch`], [`Error::NotConfirmed`], [`Error::Partial`]
+/// or server errors.
 pub fn move_mail(
     store: &mut dyn MailStore,
     folder: &MailboxName,
@@ -262,18 +270,33 @@ pub fn move_mail(
     dry_run: bool,
 ) -> Result<ActionReport, Error> {
     require_folder(store, target)?;
-    if !store.supports_move()? {
-        return Err(Error::MoveUnsupported);
-    }
+    let support = store.move_support()?;
     open(store, folder, dry_run)?;
     let mail = verify(store, uid, expect)?;
+    // Without MOVE the copy is identified by Message-ID.
+    let copy_id = match support {
+        MoveSupport::Move => None,
+        _ => Some(check_copy_fallback(
+            store,
+            folder,
+            uid,
+            mail.message_id.as_ref(),
+            support,
+        )?),
+    };
     let mut confirmed = false;
     if !dry_run {
         if mark_read_first {
             store.add_flags(uid, &[FLAG_SEEN])?;
         }
-        store.move_to(uid, target)?;
-        // The source folder is still selected after MOVE.
+        match copy_id {
+            None => store.move_to(uid, target)?,
+            Some(id) => {
+                let flag = mark_read_first.then_some(FLAG_SEEN);
+                move_by_copy(store, folder, uid, id, target, flag, support)?;
+            }
+        }
+        // The source folder is selected again after the move.
         if !store.headers(&[uid])?.is_empty() {
             return Err(Error::NotConfirmed(format!("UID {uid} still in {folder}")));
         }
@@ -292,6 +315,81 @@ pub fn move_mail(
         dry_run,
         confirmed,
     })
+}
+
+/// Whether a mail can be moved without `MOVE`: its copy must be identifiable
+/// by `Message-ID`, and without `UIDPLUS` no other mail in the folder may be
+/// marked `\Deleted`, because a plain `EXPUNGE` would remove it too. The
+/// mail's own mark, left by an interrupted attempt, does not count.
+fn check_copy_fallback<'a>(
+    store: &mut dyn MailStore,
+    folder: &MailboxName,
+    uid: Uid,
+    id: Option<&'a MessageId>,
+    support: MoveSupport,
+) -> Result<&'a MessageId, Error> {
+    let id = id.ok_or(Error::MoveUnsupported)?;
+    if support == MoveSupport::CopyExpunge {
+        let count = store
+            .deleted_uids()?
+            .into_iter()
+            .filter(|&d| d != uid)
+            .count();
+        if count > 0 {
+            return Err(Error::OthersMarkedDeleted {
+                folder: folder.to_string(),
+                count,
+            });
+        }
+    }
+    Ok(id)
+}
+
+/// Moves a mail on a server without `MOVE`. The original is only removed once
+/// its own copy is confirmed in the target: a mail with this `Message-ID` that
+/// was not there before the copy. An existing one is never taken as the copy,
+/// because two different mails can share a `Message-ID` (a CC to oneself and
+/// the list copy); a retry after an interruption leaves a duplicate instead.
+fn move_by_copy(
+    store: &mut dyn MailStore,
+    folder: &MailboxName,
+    uid: Uid,
+    id: &MessageId,
+    target: &MailboxName,
+    flag: Option<&str>,
+    support: MoveSupport,
+) -> Result<(), Error> {
+    // UIDs only grow within a folder, so the copy is newer than anything before.
+    let before = newest_with_id(store, target, id)?.map(|h| h.uid);
+    store.select(folder)?;
+    store.copy_to(uid, target)?;
+    let Some(copy) = newest_with_id(store, target, id)?.filter(|h| Some(h.uid) > before) else {
+        return Err(Error::NotConfirmed(format!(
+            "no new copy of {id} in {target}"
+        )));
+    };
+    if let Some(flag) = flag
+        && !has_flag(&copy.flags, flag)
+    {
+        return Err(Error::NotConfirmed(format!(
+            "{flag} not set on the copy of {id} in {target}"
+        )));
+    }
+    store.select(folder)?;
+    store.add_flags(uid, &[FLAG_DELETED])?;
+    if support == MoveSupport::CopyUidExpunge {
+        return store.expunge_uid(uid);
+    }
+    // Checked before the copy; checked again right before EXPUNGE in case
+    // another client marked a mail in between.
+    let deleted = store.deleted_uids()?;
+    if deleted != [uid] {
+        store.remove_flags(uid, &[FLAG_DELETED])?;
+        return Err(Error::Partial(format!(
+            "copied to {target}, but the original stays in {folder}: another mail there was marked deleted meanwhile, so EXPUNGE would remove it too"
+        )));
+    }
+    store.expunge_all_deleted()
 }
 
 /// Creates a folder if it does not exist yet.

@@ -164,22 +164,6 @@ fn move_checks_everything() -> Result<(), Error> {
         ),
         Err(Error::FolderMissing("Noselect".into()))
     );
-    let mut no_move = FakeStore {
-        move_supported: false,
-        ..FakeStore::with_inbox(vec![mail(2, "a@x", "S", &[])])
-    };
-    assert_eq!(
-        move_mail(
-            &mut no_move,
-            &inbox,
-            uid(2)?,
-            &expect("m2@test")?,
-            &target,
-            false,
-            false
-        ),
-        Err(Error::MoveUnsupported)
-    );
     Ok(())
 }
 
@@ -829,5 +813,230 @@ fn moves_into_the_inbox_however_it_is_spelled() -> Result<(), Error> {
         create_folder(&mut store, &folder("Inbox")?, true),
         Err(Error::FolderExists("INBOX".into()))
     );
+    Ok(())
+}
+
+/// INBOX with mail 2 to move and mail 3 already marked `\Deleted` by another client.
+fn no_move_store(support: MoveSupport, deleted_neighbour: bool) -> FakeStore {
+    let neighbour: &[&str] = if deleted_neighbour {
+        &[FLAG_DELETED]
+    } else {
+        &[]
+    };
+    FakeStore {
+        move_support: support,
+        ..FakeStore::with_inbox(vec![
+            mail(2, "a@x", "S", &[]),
+            mail(3, "b@x", "T", neighbour),
+        ])
+    }
+}
+
+fn move_two(store: &mut FakeStore, mark_read: bool, dry_run: bool) -> Result<ActionReport, Error> {
+    move_mail(
+        store,
+        &folder("INBOX")?,
+        uid(2)?,
+        &expect("m2@test")?,
+        &folder("Work/GitHub")?,
+        mark_read,
+        dry_run,
+    )
+}
+
+#[test]
+fn uidplus_moves_by_copy_and_removes_only_this_mail() -> Result<(), Error> {
+    let mut store = no_move_store(MoveSupport::CopyUidExpunge, true);
+    let report = move_two(&mut store, true, false)?;
+    assert!(report.confirmed);
+    // Mail 3 was marked deleted by someone else and must survive.
+    assert_eq!(store.uids_of("INBOX"), vec![uid(3)?]);
+    assert_eq!(store.flags("INBOX", 3), vec![FLAG_DELETED.to_owned()]);
+    let filed = store.uids_of("Work/GitHub");
+    assert_eq!(filed.len(), 1);
+    let copy = filed.first().map_or(0, |u| u.get());
+    assert_eq!(store.flags("Work/GitHub", copy), vec![FLAG_SEEN.to_owned()]);
+    Ok(())
+}
+
+#[test]
+fn without_uidplus_moves_when_no_other_mail_is_marked() -> Result<(), Error> {
+    let mut store = no_move_store(MoveSupport::CopyExpunge, false);
+    assert!(move_two(&mut store, false, false)?.confirmed);
+    assert_eq!(store.uids_of("INBOX"), vec![uid(3)?]);
+    assert_eq!(store.uids_of("Work/GitHub").len(), 1);
+    Ok(())
+}
+
+#[test]
+fn without_uidplus_refuses_when_other_mails_are_marked() {
+    for dry_run in [true, false] {
+        let mut store = no_move_store(MoveSupport::CopyExpunge, true);
+        let before = store.snapshot();
+        assert_eq!(
+            move_two(&mut store, false, dry_run),
+            Err(Error::OthersMarkedDeleted {
+                folder: "INBOX".into(),
+                count: 1
+            })
+        );
+        assert_eq!(store.snapshot(), before, "nothing may change");
+    }
+}
+
+#[test]
+fn without_uidplus_a_mark_set_meanwhile_keeps_the_original() -> Result<(), Error> {
+    let mut store = FakeStore {
+        race_deleted: Some(3),
+        ..no_move_store(MoveSupport::CopyExpunge, false)
+    };
+    let result = move_two(&mut store, false, false);
+    assert!(matches!(result, Err(Error::Partial(m)) if m.contains("another mail")));
+    // Both mails are still in INBOX; our own \Deleted mark is taken back.
+    assert_eq!(store.uids_of("INBOX"), vec![uid(2)?, uid(3)?]);
+    assert!(store.flags("INBOX", 2).is_empty());
+    assert_eq!(store.uids_of("Work/GitHub").len(), 1);
+    Ok(())
+}
+
+#[test]
+fn an_unconfirmed_copy_leaves_the_original_untouched() {
+    for support in [MoveSupport::CopyUidExpunge, MoveSupport::CopyExpunge] {
+        let mut store = FakeStore {
+            lose_copies: true,
+            ..no_move_store(support, false)
+        };
+        let before = store.snapshot();
+        assert!(matches!(
+            move_two(&mut store, false, false),
+            Err(Error::NotConfirmed(_))
+        ));
+        assert_eq!(store.snapshot(), before);
+    }
+}
+
+#[test]
+fn a_retry_after_an_interruption_copies_again_and_finishes() -> Result<(), Error> {
+    // The earlier attempt copied and marked the original, then the connection
+    // dropped before EXPUNGE. Its own mark must not block the retry.
+    let mut store = FakeStore {
+        move_support: MoveSupport::CopyExpunge,
+        ..FakeStore::with_inbox(vec![
+            mail(2, "a@x", "S", &[FLAG_DELETED]),
+            mail(3, "b@x", "T", &[]),
+        ])
+    };
+    store.select(&folder("INBOX")?)?;
+    store.copy_to(uid(2)?, &folder("Work/GitHub")?)?;
+    assert!(move_two(&mut store, false, false)?.confirmed);
+    assert_eq!(store.uids_of("INBOX"), vec![uid(3)?]);
+    // A duplicate is harmless; a lost mail would not be.
+    assert_eq!(store.uids_of("Work/GitHub").len(), 2);
+    Ok(())
+}
+
+#[test]
+fn two_mails_with_the_same_message_id_both_keep_a_copy() -> Result<(), Error> {
+    // A CC to oneself and the mailing-list copy share one Message-ID.
+    let cc = FakeStore::raw_mail(
+        2,
+        b"Message-ID: <same@x>\r\nFrom: a@x\r\nSubject: S\r\n\r\ndirect".to_vec(),
+        &[],
+    );
+    let list = FakeStore::raw_mail(
+        3,
+        b"Message-ID: <same@x>\r\nFrom: a@x\r\nSubject: [list] S\r\n\r\nlist footer".to_vec(),
+        &[],
+    );
+    for support in [MoveSupport::CopyUidExpunge, MoveSupport::CopyExpunge] {
+        let mut store = FakeStore {
+            move_support: support,
+            ..FakeStore::with_inbox(vec![cc.clone(), list.clone()])
+        };
+        for n in [2, 3] {
+            move_mail(
+                &mut store,
+                &folder("INBOX")?,
+                uid(n)?,
+                &expect("same@x")?,
+                &folder("Work/GitHub")?,
+                false,
+                false,
+            )?;
+        }
+        assert!(store.uids_of("INBOX").is_empty());
+        let bodies: Vec<String> = store
+            .snapshot()
+            .into_iter()
+            .filter(|(name, _)| name == "Work/GitHub")
+            .flat_map(|(_, mails)| mails)
+            .map(|(_, _, body)| String::from_utf8_lossy(&body).into_owned())
+            .collect();
+        assert_eq!(bodies.len(), 2, "{support:?}");
+        assert!(bodies.iter().any(|b| b.ends_with("direct")));
+        assert!(bodies.iter().any(|b| b.ends_with("list footer")));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_copy_without_the_read_mark_keeps_the_original() -> Result<(), Error> {
+    let mut store = FakeStore {
+        ignore_flags: true,
+        ..no_move_store(MoveSupport::CopyUidExpunge, false)
+    };
+    let result = move_two(&mut store, true, false);
+    assert!(matches!(result, Err(Error::NotConfirmed(m)) if m.contains("not set on the copy")));
+    assert_eq!(store.uids_of("INBOX"), vec![uid(2)?, uid(3)?]);
+    Ok(())
+}
+
+#[test]
+fn without_move_a_mail_without_message_id_is_refused() -> Result<(), Error> {
+    let no_id = FakeStore::raw_mail(4, b"From: z@x.de\r\nSubject: no id\r\n\r\nx".to_vec(), &[]);
+    let r = MailRef::from_fallback("", "z@x.de", "no id", 33);
+    for dry_run in [true, false] {
+        let mut store = FakeStore {
+            move_support: MoveSupport::CopyUidExpunge,
+            ..FakeStore::with_inbox(vec![no_id.clone()])
+        };
+        let before = store.snapshot();
+        assert_eq!(
+            move_mail(
+                &mut store,
+                &folder("INBOX")?,
+                uid(4)?,
+                &Expect::Ref(r.clone()),
+                &folder("Work/GitHub")?,
+                false,
+                dry_run,
+            ),
+            Err(Error::MoveUnsupported)
+        );
+        assert_eq!(store.snapshot(), before);
+    }
+    Ok(())
+}
+
+#[test]
+fn every_server_failure_aborts_a_move_without_move() -> Result<(), Error> {
+    for support in [MoveSupport::CopyUidExpunge, MoveSupport::CopyExpunge] {
+        let calls = fails_cleanly_at_every_call(&|| no_move_store(support, false), &|store| {
+            move_two(store, true, false).map(|_| ())
+        })?;
+        assert!(calls > 10, "{support:?}: {calls}");
+    }
+    // The race path, too: removing our own mark again can fail.
+    let calls = fails_cleanly_at_every_call(
+        &|| FakeStore {
+            race_deleted: Some(3),
+            ..no_move_store(MoveSupport::CopyExpunge, false)
+        },
+        &|store| match move_two(store, false, false) {
+            Err(Error::Partial(m)) if m.contains("another mail") => Ok(()),
+            other => other.map(|_| ()),
+        },
+    )?;
+    assert!(calls > 10);
     Ok(())
 }

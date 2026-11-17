@@ -46,9 +46,25 @@ pub enum Error {
     /// The mail already carries the `$Forwarded` flag.
     #[error("mail at UID {0} was already forwarded")]
     AlreadyForwarded(u32),
-    /// The server lacks the IMAP `MOVE` extension; copying and expunging is refused.
-    #[error("server does not support MOVE; refusing to copy and expunge")]
+    /// The server lacks the IMAP `MOVE` extension and the mail has no
+    /// `Message-ID`, so a copy could not be confirmed before the original is
+    /// removed.
+    #[error(
+        "server does not support MOVE and the mail has no Message-ID; refusing to copy and remove it, the copy could not be confirmed"
+    )]
     MoveUnsupported,
+    /// The server has neither `MOVE` nor `UIDPLUS`, and other mails in the
+    /// folder are already marked `\Deleted`: a plain `EXPUNGE` would remove
+    /// them too.
+    #[error(
+        "server supports neither MOVE nor UIDPLUS and {count} other mail(s) in {folder} are marked deleted; refusing to expunge, it would remove them too"
+    )]
+    OthersMarkedDeleted {
+        /// Source folder.
+        folder: String,
+        /// Number of other mails marked `\Deleted`.
+        count: usize,
+    },
     /// The folder does not exist.
     #[error("folder does not exist: {0}")]
     FolderMissing(String),
