@@ -11,6 +11,10 @@ readme = "../../README.md"
 keywords = ["imap", "email", "cli", "agent", "mailbox"]
 categories = ["command-line-utilities", "email"]
 
+[features]
+## Compile OpenSSL into the binary (used for the static Linux release build).
+vendored-openssl = ["native-tls/vendored"]
+
 [[bin]]
 name = "mailctl"
 path = "src/main.rs"

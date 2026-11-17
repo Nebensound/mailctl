@@ -8,6 +8,20 @@ it reliably.
 **It never deletes mail.** There is no delete command, and moving refuses to
 fall back to copy-and-expunge on servers without the IMAP `MOVE` extension.
 
+## Installation
+
+Binaries for macOS (Apple Silicon and Intel) and Linux (x86_64) are attached
+to each [GitHub release](https://github.com/Nebensound/mailctl/releases);
+unpack one and put `mailctl` on your `PATH`. The Linux binary is statically
+linked (musl, OpenSSL compiled in), so it needs no particular glibc or
+OpenSSL; TLS needs the system CA certificates (`ca-certificates` package, or
+`SSL_CERT_FILE`), which slim images such as `debian:*-slim` and `alpine` do
+not include by default. With Rust installed:
+
+```sh
+cargo install mailctl --locked
+```
+
 ## Safety model
 
 - Each account has an **access level**, enforced by mailctl itself (see
@@ -266,9 +280,30 @@ release smoke test.
   example GreenMail or Dovecot in a container) in CI, then remove the marks
   from the IMAP and SMTP adapters.
 
+## Releasing
+
+1. Set `version` in `crates/mailctl/Cargo.toml`, merge that to `main`.
+2. Tag the merge commit and push the tag: `git tag v0.1.0 && git push origin v0.1.0`.
+
+The release workflow then checks that the tag matches the version and is on
+`main`, runs the full CI, builds the binaries, creates the GitHub release with
+them and finally publishes the crate to crates.io (a crates.io version can
+never be replaced, so that comes last). It needs the secret
+`CARGO_REGISTRY_TOKEN` (a crates.io API token with the `publish-update` and,
+for the first release, `publish-new` scope) in the `crates-io` environment.
+
+Repository settings that keep the release path as protected as `main`:
+
+- Environment `crates-io`: deployment refs limited to tags matching `v*`, so
+  the token is not available to branch workflows.
+- A tag ruleset for `v*` that only maintainers may create, update or delete.
+- After the first release, crates.io Trusted Publishing
+  (`rust-lang/crates-io-auth-action`) can replace the long-lived token; the
+  first publish of a new crate still needs one.
+
 ## Status
 
-0.0.3, early prototype. Not yet published on crates.io.
+Early prototype, not yet tested against real mailboxes at scale.
 
 ## License
 
