@@ -1,25 +1,124 @@
 # Self-contained CI: every check of this repository can be reproduced locally.
+# Every merge into main is released: the version job derives the version from
+# the commit messages, and the publish job ships it to crates.io and as a
+# GitHub release with binaries. See "Releasing" in the README.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
-  # The release workflow runs the full CI for the tagged commit first.
-  workflow_call:
+  # Dispatched by the version job after it pushes a version commit: pushes made
+  # with GITHUB_TOKEN never trigger workflows, so the required checks for the
+  # new head commit are started explicitly.
+  workflow_dispatch:
 
+# Jobs get write access only where they need it.
 permissions:
   contents: read
 
+# A newer push to the same ref supersedes a running check. Runs on main
+# publish releases, so every main run gets its own group (per commit): a shared
+# group would let GitHub replace a pending main run, and that merge would never
+# be released.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: "1.97.0"
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+      pull-requests: read
+    outputs:
+      version: ${{ steps.effective.outputs.version }}
+      version_tag: ${{ steps.effective.outputs.version_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # semantic-version walks the full history and tags to derive the version.
+          fetch-depth: 0
+          # On pull requests, check out the branch head instead of the merge
+          # commit so the derived version can be committed back to the branch.
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
+      - name: Identify the pull request branch
+        id: pull-request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "branch=$HEAD_REF" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && \
+               [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            pr="$(gh pr list --state open --head "$GITHUB_REF_NAME" --base "$DEFAULT_BRANCH" \
+              --json number,isCrossRepository --jq '[.[] | select(.isCrossRepository == false)][0].number // empty')"
+            if [ -n "$pr" ]; then
+              echo "branch=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Calculate semantic version
+        id: semantic
+        uses: PaulHatch/semantic-version@5ae1354e589c5a67345fb2c6e65b025ff676d7c7 # v6.0.7
+        with:
+          tag_prefix: "v"
+          major_pattern: "(MAJOR)"
+          minor_pattern: "(MINOR)"
+          version_format: "${major}.${minor}.${patch}"
+      - name: Resolve effective version
+        id: effective
+        env:
+          DERIVED: ${{ steps.semantic.outputs.version }}
+        run: |
+          manifest="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/mailctl/Cargo.toml | head -n 1)"
+          version="$DERIVED"
+          if [ -n "$manifest" ] && [ "$manifest" != "$DERIVED" ] && \
+             [ "$(printf '%s\n%s\n' "$DERIVED" "$manifest" | sort -V | tail -n 1)" = "$manifest" ]; then
+            echo "Keeping manually raised Cargo.toml version $manifest (derived: $DERIVED)"
+            version="$manifest"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version_tag=v$version" >> "$GITHUB_OUTPUT"
+      # Outside pull requests there is no branch the job could push a fix to,
+      # so a version mismatch must fail loudly instead of being papered over.
+      - name: Verify Cargo.toml carries the effective version
+        if: steps.pull-request.outputs.branch == ''
+        env:
+          VERSION: ${{ steps.effective.outputs.version }}
+        run: |
+          manifest="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/mailctl/Cargo.toml | head -n 1)"
+          if [ "$manifest" != "$VERSION" ]; then
+            echo "::error::Cargo.toml version $manifest does not match the effective version $VERSION. The version job cannot commit a fix outside pull requests; raise the version on a pull request branch instead."
+            exit 1
+          fi
+      - name: Commit derived version to the branch
+        if: steps.pull-request.outputs.branch != ''
+        env:
+          VERSION: ${{ steps.effective.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          PR_BRANCH: ${{ steps.pull-request.outputs.branch }}
+        run: |
+          sed -i "0,/^version = \".*\"\$/s//version = \"$VERSION\"/" crates/mailctl/Cargo.toml
+          sed -i "/^name = \"mailctl\"\$/{n;s/^version = \".*\"\$/version = \"$VERSION\"/;}" Cargo.lock
+          if git diff --quiet; then
+            echo "Cargo.toml already carries version $VERSION"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Set crate version to $VERSION"
+          git push origin "HEAD:refs/heads/$PR_BRANCH"
+          gh workflow run ci.yml --ref "$PR_BRANCH"
+
   lint:
     name: fmt and clippy
     runs-on: ubuntu-latest
@@ -109,7 +208,7 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
 
-  release:
+  smoke:
     name: release build and smoke test
     runs-on: ${{ matrix.os }}
     strategy:
@@ -117,7 +216,7 @@ jobs:
         include:
           - { os: ubuntu-latest }
           - { os: macos-latest }
-          # The static Linux binary the release workflow ships.
+          # The static Linux binary the release ships.
           - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, features: vendored-openssl }
     steps:
       - uses: actions/checkout@v7
@@ -148,3 +247,80 @@ jobs:
           set -e
           test "$code" -eq 2
           grep -q 'is set to `read`' out.json
+
+  # Release path, main only: every merge is released.
+  binaries:
+    name: build ${{ matrix.target }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    needs: [version, lint, test, coverage, dependencies, smoke]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          # Static (musl, OpenSSL compiled in): runs on any x86_64 Linux,
+          # including slim container images without libssl.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, features: vendored-openssl }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          # Cross-built on the arm64 runner; checked below through Rosetta.
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+      - if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+      - name: the built binary runs
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/mailctl"
+          "$bin" --version | grep -qx "mailctl ${{ needs.version.outputs.version }}"
+          if [[ "${{ matrix.target }}" == *-musl ]]; then
+            file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          fi
+      - name: package
+        shell: bash
+        run: |
+          name="mailctl-${{ needs.version.outputs.version }}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/mailctl" README.md LICENSE-MIT LICENSE-APACHE "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: mailctl-*.tar.gz*
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.binaries.result == 'success' }}
+    needs: [version, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # On main the version job has already verified that Cargo.toml carries
+      # the effective version, so the tree is clean and the package is
+      # published exactly as committed; never with --allow-dirty.
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p mailctl --locked
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      # The tag is created here, on the exact commit that was built and
+      # published, and only after crates.io accepted the version.
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.version_tag }}
+        run: gh release create "$TAG" dist/mailctl-*.tar.gz* --target "$GITHUB_SHA" --title "mailctl $TAG" --generate-notes
