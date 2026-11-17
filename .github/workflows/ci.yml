@@ -102,7 +102,12 @@ jobs:
         run: |
           manifest="$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/mailctl/Cargo.toml | head -n 1)"
           version="$DERIVED"
-          if [ -n "$manifest" ] && [ "$manifest" != "$DERIVED" ] && \
+          # Only a version raised by a person counts as raised by hand. A bump
+          # this job committed earlier is derived again, so it can also go
+          # down (e.g. when the only counting commit was retitled to `ci:`).
+          bumped_by="$(git log -1 --format=%an -- crates/mailctl/Cargo.toml)"
+          if [ "$bumped_by" != "github-actions[bot]" ] && \
+             [ -n "$manifest" ] && [ "$manifest" != "$DERIVED" ] && \
              [ "$(printf '%s\n%s\n' "$DERIVED" "$manifest" | sort -V | tail -n 1)" = "$manifest" ]; then
             echo "Keeping manually raised Cargo.toml version $manifest (derived: $DERIVED)"
             version="$manifest"

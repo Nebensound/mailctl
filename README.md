@@ -307,7 +307,8 @@ nobody sets versions or pushes tags by hand.
   so at least one of them carries it too.
 - On a pull request, CI commits the derived version to `Cargo.toml` and
   `Cargo.lock` on the branch and starts the checks again for that commit. A
-  version raised by hand is kept if it is higher. On `main`, CI only verifies
+  version raised by hand is kept if it is higher; a version this job set
+  earlier is derived again and can go down. On `main`, CI only verifies
   that the tree carries the derived version.
 - After all checks pass on `main`, CI builds the binaries, publishes the crate
   to crates.io and then creates the tag and the GitHub release with the
