@@ -300,9 +300,25 @@ tags by hand.
   that the tree carries the derived version.
 - After all checks pass on `main`, CI builds the binaries, publishes the crate
   to crates.io and then creates the tag and the GitHub release with the
-  binaries on that commit. It needs the repository secret
+  binaries on that commit. Both publishing steps skip what already exists,
+  so a failed release run is finished by re-running it. It needs the secret
   `CARGO_REGISTRY_TOKEN` (a crates.io API token with the `publish-update` and,
-  for the first release, `publish-new` scope).
+  for the first release, `publish-new` scope, whose crate scope includes
+  `mailctl`).
+- Pull requests from forks fail the version job: their version cannot be
+  committed. A maintainer brings such a change in through a branch of this
+  repository.
+
+Repository settings this relies on:
+
+- The ruleset on `main` requires the CI checks, at least `version`, with
+  "Require branches to be up to date before merging". A pull request opened
+  before another one was released then has to update its branch, which derives
+  its version again. Merge the next pull request only after the previous
+  release run has created its tag; until then the tag the derivation starts
+  from does not exist yet.
+- Optionally, the token lives in an environment limited to `main`, so branch
+  workflows cannot read it.
 
 ## Status
 
