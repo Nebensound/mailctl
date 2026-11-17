@@ -39,6 +39,8 @@ jobs:
     outputs:
       version: ${{ steps.effective.outputs.version }}
       version_tag: ${{ steps.effective.outputs.version_tag }}
+      # Whether this version still has to be released (its tag does not exist).
+      release: ${{ steps.effective.outputs.release }}
     steps:
       # A fork's branch does not exist here and its token is read-only, so the
       # version could never be committed and main would fail after the merge.
@@ -78,8 +80,20 @@ jobs:
         uses: PaulHatch/semantic-version@5ae1354e589c5a67345fb2c6e65b025ff676d7c7 # v6.0.7
         with:
           tag_prefix: "v"
-          major_pattern: "(MAJOR)"
-          minor_pattern: "(MINOR)"
+          # Conventional Commits: `!` after the type or a `BREAKING CHANGE:`
+          # footer = major, `feat` = minor, everything else = patch (see
+          # "Releasing" in the README). The body is searched for the footer;
+          # the action allows no multiline flag, so the footer is matched
+          # after a newline.
+          major_pattern: '/^\w+(\(.+\))?!:|(^|\n)BREAKING[ -]CHANGE:/'
+          minor_pattern: '/^feat(\(.+\))?:/'
+          search_commit_body: true
+          # While the major version is 0, everything moves one place (Cargo
+          # convention): `!` = minor, `feat` and `fix` = patch.
+          enable_prerelease_mode: true
+          # Changes that do not touch the shipped program are released with
+          # the next change that does; so is this job's own version commit.
+          ignore_commits_pattern: '/^((ci|docs|test|chore|style)(\(.+\))?:|Set crate version to )/'
           version_format: "${major}.${minor}.${patch}"
       - name: Resolve effective version
         id: effective
@@ -95,6 +109,12 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "version_tag=v$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$version" > /dev/null; then
+            echo "v$version is already released"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
       # Outside pull requests there is no branch the job could push a fix to,
       # so a version mismatch must fail loudly instead of being papered over.
       - name: Verify Cargo.toml carries the effective version
@@ -255,10 +275,10 @@ jobs:
           test "$code" -eq 2
           grep -q 'is set to `read`' out.json
 
-  # Release path, main only: every merge is released.
+  # Release path, main only: every merge that changes the version is released.
   binaries:
     name: build ${{ matrix.target }}
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.release == 'true' }}
     needs: [version, lint, test, coverage, dependencies, smoke]
     runs-on: ${{ matrix.os }}
     strategy:

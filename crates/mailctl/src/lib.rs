@@ -4,6 +4,10 @@
 //! list. Every change addresses a mail by UID **and** checks its `Message-ID`
 //! (or the stable [`types::MailRef`]) first, and is read back from the server
 //! afterwards. There is deliberately no way to delete mail.
+//!
+//! The library is the implementation of the `mailctl` command line, not a
+//! stable API: releases are versioned by the command line and its JSON output,
+//! and the library can change in any release.
 
 // The coverage job runs on nightly with `--cfg coverage_nightly` and leaves
 // out the few I/O wrappers marked `coverage(off)`, each with its reason.

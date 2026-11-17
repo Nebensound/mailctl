@@ -280,20 +280,31 @@ release smoke test.
   example GreenMail or Dovecot in a container) in CI, then remove the marks
   from the IMAP and SMTP adapters.
 
+## Versioning
+
+The version describes the command line: its commands, options, configuration
+and JSON output. The Rust library in this crate is the implementation of the
+command line, not a stable API; it can change in any release.
+
 ## Releasing
 
-Every merge into `main` publishes a release; nobody sets versions or pushes
-tags by hand.
+Every merge into `main` that changes the shipped program publishes a release;
+nobody sets versions or pushes tags by hand.
 
-- The version is derived from commit messages
-  ([semantic-version](https://github.com/PaulHatch/semantic-version), tags
-  `vX.Y.Z`): include `(MINOR)` in the pull request title, which becomes the
-  squash commit message, for new features and for breaking changes.
-  Everything else is a patch release.
-- The crate stays on `0.x` for now. Under Cargo's semver rules a `0.x` minor
-  bump is already breaking, so breaking changes use `(MINOR)` too. Do not use
-  `(MAJOR)`: it would release `1.0.0`, and the marker cannot be removed from
-  the branch history without rewriting it.
+- The version is derived from [Conventional
+  Commits](https://www.conventionalcommits.org/) with
+  [semantic-version](https://github.com/PaulHatch/semantic-version), tags
+  `vX.Y.Z`: `feat:` releases a minor version, `!` after the type (`feat!:`,
+  `refactor(store)!:`) or a `BREAKING CHANGE:` footer a major version,
+  everything else (`fix:`, `deps:`, `refactor:`, ...) a patch version.
+  `ci:`, `docs:`, `test:`, `chore:` and `style:` release nothing on their own;
+  they go out with the next release. While the
+  major version is 0, everything moves one place, as Cargo treats `0.x`:
+  `!` releases a minor version (`0.1.0` → `0.2.0`), `feat:` and `fix:` a patch
+  version (`0.1.0` → `0.1.1`). The pull
+  request title becomes the squash commit on `main`, so it must carry the
+  type; on the pull request the version is derived from the branch commits,
+  so at least one of them carries it too.
 - On a pull request, CI commits the derived version to `Cargo.toml` and
   `Cargo.lock` on the branch and starts the checks again for that commit. A
   version raised by hand is kept if it is higher. On `main`, CI only verifies
