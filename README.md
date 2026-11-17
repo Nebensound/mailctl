@@ -282,24 +282,43 @@ release smoke test.
 
 ## Releasing
 
-1. Set `version` in `crates/mailctl/Cargo.toml`, merge that to `main`.
-2. Tag the merge commit and push the tag: `git tag v0.1.0 && git push origin v0.1.0`.
+Every merge into `main` publishes a release; nobody sets versions or pushes
+tags by hand.
 
-The release workflow then checks that the tag matches the version and is on
-`main`, runs the full CI, builds the binaries, creates the GitHub release with
-them and finally publishes the crate to crates.io (a crates.io version can
-never be replaced, so that comes last). It needs the secret
-`CARGO_REGISTRY_TOKEN` (a crates.io API token with the `publish-update` and,
-for the first release, `publish-new` scope) in the `crates-io` environment.
+- The version is derived from commit messages
+  ([semantic-version](https://github.com/PaulHatch/semantic-version), tags
+  `vX.Y.Z`): include `(MINOR)` in the pull request title, which becomes the
+  squash commit message, for new features and for breaking changes.
+  Everything else is a patch release.
+- The crate stays on `0.x` for now. Under Cargo's semver rules a `0.x` minor
+  bump is already breaking, so breaking changes use `(MINOR)` too. Do not use
+  `(MAJOR)`: it would release `1.0.0`, and the marker cannot be removed from
+  the branch history without rewriting it.
+- On a pull request, CI commits the derived version to `Cargo.toml` and
+  `Cargo.lock` on the branch and starts the checks again for that commit. A
+  version raised by hand is kept if it is higher. On `main`, CI only verifies
+  that the tree carries the derived version.
+- After all checks pass on `main`, CI builds the binaries, publishes the crate
+  to crates.io and then creates the tag and the GitHub release with the
+  binaries on that commit. Both publishing steps skip what already exists,
+  so a failed release run is finished by re-running it. It needs the secret
+  `CARGO_REGISTRY_TOKEN` (a crates.io API token with the `publish-update` and,
+  for the first release, `publish-new` scope, whose crate scope includes
+  `mailctl`).
+- Pull requests from forks fail the version job: their version cannot be
+  committed. A maintainer brings such a change in through a branch of this
+  repository.
 
-Repository settings that keep the release path as protected as `main`:
+Repository settings this relies on:
 
-- Environment `crates-io`: deployment refs limited to tags matching `v*`, so
-  the token is not available to branch workflows.
-- A tag ruleset for `v*` that only maintainers may create, update or delete.
-- After the first release, crates.io Trusted Publishing
-  (`rust-lang/crates-io-auth-action`) can replace the long-lived token; the
-  first publish of a new crate still needs one.
+- The ruleset on `main` requires the CI checks, at least `version`, with
+  "Require branches to be up to date before merging". A pull request opened
+  before another one was released then has to update its branch, which derives
+  its version again. Merge the next pull request only after the previous
+  release run has created its tag; until then the tag the derivation starts
+  from does not exist yet.
+- Optionally, the token lives in an environment limited to `main`, so branch
+  workflows cannot read it.
 
 ## Status
 
