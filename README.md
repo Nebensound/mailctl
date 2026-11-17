@@ -275,12 +275,14 @@ in-memory mailbox (`testing.rs`). The adapters in `src/adapters/` only
 translate to IMAP, SMTP, files, environment and keychain.
 
 End-to-end tests (`src/tests/e2e.rs`) run the command line through the real
-IMAP adapter and TLS against a scripted server on a local port
+IMAP and SMTP adapters and TLS against scripted servers on local ports
 (`src/tests/server/`), with a certificate authority made for each test run.
-The server plays Dovecot, iCloud Mail and a server with nothing beyond RFC
-3501; each profile repeats what the real server answered to the same
+The IMAP server plays Dovecot, iCloud Mail and a server with nothing beyond
+RFC 3501; each profile repeats what the real server answered to the same
 commands (capabilities, `LIST` attributes, `PERMANENTFLAGS`, iCloud's header
-search that never matches).
+search that never matches). The SMTP server takes STARTTLS or implicit TLS
+and can file what it sends in the sent folder itself, as Gmail and
+Microsoft 365 do.
 
 ## Coverage
 
