@@ -869,6 +869,24 @@ fn without_uidplus_moves_when_no_other_mail_is_marked() -> Result<(), Error> {
 }
 
 #[test]
+fn moves_without_move_where_the_header_search_finds_nothing() -> Result<(), Error> {
+    // iCloud: no MOVE, and `SEARCH HEADER Message-ID` never matches.
+    for support in [MoveSupport::CopyUidExpunge, MoveSupport::CopyExpunge] {
+        let mut store = FakeStore {
+            no_header_search: true,
+            ..no_move_store(support, false)
+        };
+        assert!(move_two(&mut store, true, false)?.confirmed, "{support:?}");
+        assert_eq!(store.uids_of("INBOX"), vec![uid(3)?]);
+        let filed = store.uids_of("Work/GitHub");
+        assert_eq!(filed.len(), 1);
+        let copy = filed.first().map_or(0, |u| u.get());
+        assert_eq!(store.flags("Work/GitHub", copy), vec![FLAG_SEEN.to_owned()]);
+    }
+    Ok(())
+}
+
+#[test]
 fn without_uidplus_refuses_when_other_mails_are_marked() {
     for dry_run in [true, false] {
         let mut store = no_move_store(MoveSupport::CopyExpunge, true);

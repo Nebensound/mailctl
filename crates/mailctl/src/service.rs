@@ -248,6 +248,34 @@ fn newest_with_id(
         .max_by_key(|h| h.uid))
 }
 
+/// Selects `folder` and returns its highest UID, if it holds any mail.
+fn newest_uid(store: &mut dyn MailStore, folder: &MailboxName) -> Result<Option<Uid>, Error> {
+    store.select(folder)?;
+    Ok(store.uids()?.into_iter().max())
+}
+
+/// Selects `folder` and returns the newest mail above `after` whose
+/// `Message-ID` is exactly `id`. Reads the headers of those mails instead of
+/// using the server's header search.
+fn newest_with_id_above(
+    store: &mut dyn MailStore,
+    folder: &MailboxName,
+    id: &MessageId,
+    after: Option<Uid>,
+) -> Result<Option<RawHeader>, Error> {
+    store.select(folder)?;
+    let newer: Vec<Uid> = store
+        .uids()?
+        .into_iter()
+        .filter(|&u| Some(u) > after)
+        .collect();
+    Ok(store
+        .headers(&newer)?
+        .into_iter()
+        .filter(|h| model::summary_from_header(h).message_id.as_ref() == Some(id))
+        .max_by_key(|h| h.uid))
+}
+
 /// Moves a mail to another folder of the same account, optionally marking it read first.
 ///
 /// Servers without `MOVE` get a copy, which is confirmed in the target before
@@ -300,9 +328,14 @@ pub fn move_mail(
         if !store.headers(&[uid])?.is_empty() {
             return Err(Error::NotConfirmed(format!("UID {uid} still in {folder}")));
         }
-        // Without a Message-ID the mail cannot be found again in the target:
-        // it left the source, but that is not confirmed as filed.
-        if let Some(id) = &mail.message_id {
+        if copy_id.is_some() {
+            // The copy was confirmed by its new UID before the original was
+            // removed; servers without MOVE (iCloud) may not answer a header
+            // search, so it is not looked up again.
+            confirmed = true;
+        } else if let Some(id) = &mail.message_id {
+            // Without a Message-ID the mail cannot be found again in the
+            // target: it left the source, but that is not confirmed as filed.
             let flag = mark_read_first.then_some(FLAG_SEEN);
             confirm_in_folder(store, target, id, flag)?;
             confirmed = true;
@@ -346,10 +379,12 @@ fn check_copy_fallback<'a>(
 }
 
 /// Moves a mail on a server without `MOVE`. The original is only removed once
-/// its own copy is confirmed in the target: a mail with this `Message-ID` that
-/// was not there before the copy. An existing one is never taken as the copy,
-/// because two different mails can share a `Message-ID` (a CC to oneself and
-/// the list copy); a retry after an interruption leaves a duplicate instead.
+/// its own copy is confirmed in the target: a mail with this `Message-ID`
+/// above every UID the target had before the copy. An existing one is never
+/// taken as the copy, because two different mails can share a `Message-ID` (a
+/// CC to oneself and the list copy); a retry after an interruption leaves a
+/// duplicate instead. The copy is found by UID, not by the server's header
+/// search, which some servers without `MOVE` (iCloud) never match.
 fn move_by_copy(
     store: &mut dyn MailStore,
     folder: &MailboxName,
@@ -359,11 +394,11 @@ fn move_by_copy(
     flag: Option<&str>,
     support: MoveSupport,
 ) -> Result<(), Error> {
-    // UIDs only grow within a folder, so the copy is newer than anything before.
-    let before = newest_with_id(store, target, id)?.map(|h| h.uid);
+    // UIDs only grow within a folder, so the copy is above everything before.
+    let before = newest_uid(store, target)?;
     store.select(folder)?;
     store.copy_to(uid, target)?;
-    let Some(copy) = newest_with_id(store, target, id)?.filter(|h| Some(h.uid) > before) else {
+    let Some(copy) = newest_with_id_above(store, target, id, before)? else {
         return Err(Error::NotConfirmed(format!(
             "no new copy of {id} in {target}"
         )));

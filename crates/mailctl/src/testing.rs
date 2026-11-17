@@ -51,6 +51,8 @@ pub(crate) struct FakeStore {
     pub(crate) fail_all: bool,
     /// The server forgets custom keywords such as `$Forwarded`.
     pub(crate) no_keywords: bool,
+    /// The header search never matches, as on iCloud.
+    pub(crate) no_header_search: bool,
     /// Fail the store call with this zero-based number (and only that one).
     pub(crate) fail_at_call: Option<usize>,
     /// Number of store calls so far.
@@ -132,6 +134,7 @@ impl FakeStore {
             lose_appends: false,
             fail_all: false,
             no_keywords: false,
+            no_header_search: false,
             fail_at_call: None,
             calls: Cell::new(0),
             read_only: false,
@@ -391,6 +394,9 @@ impl MailStore for FakeStore {
 
     fn find_message_id(&mut self, id: &MessageId) -> Result<Vec<Uid>, Error> {
         self.check()?;
+        if self.no_header_search {
+            return Ok(Vec::new());
+        }
         let needle = format!("<{id}>");
         Ok(self
             .current()?
