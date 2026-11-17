@@ -248,26 +248,26 @@ jobs:
         include:
           - { os: ubuntu-latest }
           - { os: macos-latest }
-          # The static Linux binary the release ships.
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, features: vendored-openssl }
+          # For Linux hosts without the OpenSSL headers that `cargo install` needs.
+          - { os: ubuntu-latest, features: vendored-openssl }
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - if: matrix.target
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --locked ${{ matrix.target && format('--target {0}', matrix.target) || '' }} ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+        with:
+          key: ${{ matrix.features }}
+      - run: cargo build --release --locked ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
       - name: smoke test outside the source tree
         shell: bash
         env:
-          TARGET: ${{ matrix.target }}
+          FEATURES: ${{ matrix.features }}
         run: |
-          bin="$PWD/target/${TARGET:+$TARGET/}release/mailctl"
-          if [ -n "$TARGET" ]; then
-            file "$bin" | grep -Eq 'statically linked|static-pie linked'
+          bin="$PWD/target/release/mailctl"
+          if [ "$FEATURES" = vendored-openssl ] && ldd "$bin" | grep libssl; then
+            echo "built with vendored-openssl but links the system OpenSSL" >&2
+            exit 1
           fi
           cd "$RUNNER_TEMP"
           "$bin" --version
@@ -278,58 +278,14 @@ jobs:
           code=$?
           set -e
           test "$code" -eq 2
+          # shellcheck disable=SC2016 # the backticks are literal text in the message
           grep -q 'is set to `read`' out.json
 
   # Release path, main only: every merge that changes the version is released.
-  binaries:
-    name: build ${{ matrix.target }}
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.release == 'true' }}
-    needs: [version, lint, test, coverage, dependencies, smoke]
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          # Static (musl, OpenSSL compiled in): runs on any x86_64 Linux,
-          # including slim container images without libssl.
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, features: vendored-openssl }
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          # Cross-built on the arm64 runner; checked below through Rosetta.
-          - { os: macos-latest, target: x86_64-apple-darwin }
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          targets: ${{ matrix.target }}
-      - if: endsWith(matrix.target, '-musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
-      - name: the built binary runs
-        shell: bash
-        run: |
-          bin="target/${{ matrix.target }}/release/mailctl"
-          "$bin" --version | grep -qx "mailctl ${{ needs.version.outputs.version }}"
-          if [[ "${{ matrix.target }}" == *-musl ]]; then
-            file "$bin" | grep -Eq 'statically linked|static-pie linked'
-          fi
-      - name: package
-        shell: bash
-        run: |
-          name="mailctl-${{ needs.version.outputs.version }}-${{ matrix.target }}"
-          mkdir "$name"
-          cp "target/${{ matrix.target }}/release/mailctl" README.md LICENSE-MIT LICENSE-APACHE "$name/"
-          tar -czf "$name.tar.gz" "$name"
-          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ matrix.target }}
-          path: mailctl-*.tar.gz*
-          if-no-files-found: error
-
   publish:
     name: publish release
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.binaries.result == 'success' }}
-    needs: [version, binaries]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.release == 'true' }}
+    needs: [version, lint, test, coverage, dependencies, smoke]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -359,12 +315,7 @@ jobs:
           else
             cargo publish -p mailctl --locked
           fi
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          path: dist
-          merge-multiple: true
-      # The tag is created here, on the exact commit that was built and
-      # published, and only after crates.io accepted the version.
+      # The tag is created here, on the exact commit that was published, and only after crates.io accepted the version.
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -373,6 +324,6 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             echo "Release $TAG already exists"
           else
-            gh release create "$TAG" dist/mailctl-*.tar.gz* --repo "$GITHUB_REPOSITORY" \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" --title "mailctl $TAG" --generate-notes
           fi
