@@ -483,9 +483,9 @@ fn record_forward(
 /// Stores the copy in the sent folder, unless the SMTP server has filed one
 /// there itself (as Gmail and Microsoft 365 do), and confirms it. A copy is
 /// a mail with this `Message-ID` above `before`, the folder's highest UID
-/// before sending, read from its headers; the header search alone would miss
-/// it on servers that never match one (iCloud). A filed copy is also found
-/// by that search.
+/// before sending, read from its headers. No header search: some servers
+/// (iCloud) never match one, and the `Message-ID` is new for this forward,
+/// so no mail at or below `before` can carry it.
 fn copy_unless_filed(
     store: &mut dyn MailStore,
     sent: &MailboxName,
@@ -493,9 +493,7 @@ fn copy_unless_filed(
     bytes: &[u8],
     before: Option<Uid>,
 ) -> Result<(), Error> {
-    if newest_with_id_above(store, sent, id, before)?.is_some()
-        || newest_with_id(store, sent, id)?.is_some()
-    {
+    if newest_with_id_above(store, sent, id, before)?.is_some() {
         return Ok(());
     }
     store.append(sent, bytes, &[FLAG_SEEN])?;

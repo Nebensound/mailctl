@@ -440,9 +440,9 @@ fn every_server_failure_aborts_the_operation() -> Result<(), Error> {
     // select, search, headers; create: folders, create, folders; forward: select,
     // headers, keywords, message, folders, the newest UID in Sent (select,
     // uids) and select again, flag, headers, then in Sent the newer mails
-    // (select, uids, headers) and the search (select, search, headers) for a
-    // copy filed by the server, append, and the newer mails again.
-    assert_eq!(calls, [3, 3, 4, 10, 6, 3, 20]);
+    // (select, uids, headers) for a copy filed by the server, append, and the
+    // newer mails again.
+    assert_eq!(calls, [3, 3, 4, 10, 6, 3, 17]);
     Ok(())
 }
 
@@ -505,10 +505,10 @@ fn failed_sent_copy_does_not_allow_a_second_forward() -> Result<(), Error> {
     };
     // Calls: select, headers, keywords, message, folders, then the sent
     // folder's newest UID (select, uids) and select again; after sending:
-    // flag, headers, then the copy check (select, uids, headers, select,
-    // search, headers) and append (fails).
+    // flag, headers, then the copy check (select, uids, headers) and append
+    // (fails).
     let mut store = FakeStore {
-        fail_at_call: Some(16),
+        fail_at_call: Some(13),
         ..FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])])
     };
     let mut sender = FakeSender::default();
@@ -753,20 +753,20 @@ fn a_copy_the_server_filed_itself_is_not_stored_again() -> Result<(), Error> {
         note: None,
         dry_run: false,
     };
-    let mut store = FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])]);
-    // What a server that files submissions itself leaves in Sent.
-    store
-        .folders
-        .entry("Sent".into())
-        .or_default()
-        .push(FakeStore::raw_mail(
-            90,
-            b"Message-ID: <fwd@mailctl>\r\nSubject: Fwd: Invoice\r\n\r\nx".to_vec(),
-            &[],
-        ));
-    let report = forward(&mut store, &mut FakeSender::default(), &config, &job)?;
+    // The SMTP server files the submission into Sent while it is sent.
+    let shared = Rc::new(RefCell::new(FakeStore::with_inbox(vec![mail(
+        2,
+        "a@x",
+        "Invoice",
+        &[],
+    )])));
+    let mut sender = FakeSender {
+        files_into: Some((Rc::clone(&shared), sent.clone())),
+        ..FakeSender::default()
+    };
+    let report = forward(&mut Shared(Rc::clone(&shared)), &mut sender, &config, &job)?;
     assert!(report.confirmed);
-    assert_eq!(store.uids_of("Sent").len(), 1);
+    assert_eq!(shared.borrow().uids_of("Sent").len(), 1);
     Ok(())
 }
 
