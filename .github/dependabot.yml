@@ -7,13 +7,6 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: deps
-    ignore:
-      # imap-proto must stay on the exact version the `imap` crate depends on:
-      # mailctl uses imap_proto::NameAttribute from imap's LIST responses, and
-      # two imap-proto versions in the tree are two incompatible types.
-      # Bump it together with `imap` by hand once imap moves on.
-      - dependency-name: imap-proto
-        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     groups:
       patch-and-minor:
         update-types: [minor, patch]

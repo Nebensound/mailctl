@@ -13,6 +13,21 @@ pub const FLAG_SEEN: &str = "\\Seen";
 pub const FLAG_FLAGGED: &str = "\\Flagged";
 /// Keyword Apple Mail and others set on forwarded mail.
 pub const FLAG_FORWARDED: &str = "$Forwarded";
+/// IMAP system flag that marks a mail for removal by `EXPUNGE`.
+pub const FLAG_DELETED: &str = "\\Deleted";
+
+/// How the server can move a mail to another folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveSupport {
+    /// `MOVE` (RFC 6851): one atomic command.
+    Move,
+    /// No `MOVE`, but `UIDPLUS` (RFC 4315): copy, then remove exactly this
+    /// mail with `UID EXPUNGE`.
+    CopyUidExpunge,
+    /// Neither: copy, then a plain `EXPUNGE`, which removes every mail marked
+    /// `\Deleted` in the folder. Only safe when no other mail is marked.
+    CopyExpunge,
+}
 
 /// Whether `flags` contains `flag`; IMAP flags compare case-insensitively.
 #[must_use]
@@ -61,7 +76,9 @@ pub struct RawMessage {
     pub body: Vec<u8>,
 }
 
-/// Operations on one IMAP account. There is deliberately no delete operation.
+/// Operations on one IMAP account. There is deliberately no general delete
+/// operation: `EXPUNGE` exists only for the move fallback on servers without
+/// `MOVE`, and [`crate::service`] calls it only after the copy is confirmed.
 pub trait MailStore {
     /// Lists all folders.
     ///
@@ -105,16 +122,43 @@ pub trait MailStore {
     /// # Errors
     /// Server errors.
     fn add_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error>;
-    /// Whether the server supports the `MOVE` extension.
+    /// Removes flags from a mail.
     ///
     /// # Errors
     /// Server errors.
-    fn supports_move(&mut self) -> Result<bool, Error>;
+    fn remove_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error>;
+    /// How the server can move mail (`MOVE`, `UIDPLUS` or neither).
+    ///
+    /// # Errors
+    /// Server errors.
+    fn move_support(&mut self) -> Result<MoveSupport, Error>;
     /// Moves a mail from the selected folder to `target`.
     ///
     /// # Errors
     /// Server errors.
     fn move_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error>;
+    /// Copies a mail from the selected folder to `target`.
+    ///
+    /// # Errors
+    /// Server errors.
+    fn copy_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error>;
+    /// UIDs in the selected folder that carry `\Deleted`.
+    ///
+    /// # Errors
+    /// Server errors.
+    fn deleted_uids(&mut self) -> Result<Vec<Uid>, Error>;
+    /// Removes this one mail if it carries `\Deleted` (`UID EXPUNGE`, needs
+    /// `UIDPLUS`).
+    ///
+    /// # Errors
+    /// Server errors.
+    fn expunge_uid(&mut self, uid: Uid) -> Result<(), Error>;
+    /// Removes every mail in the selected folder that carries `\Deleted`
+    /// (plain `EXPUNGE`). Callers must check [`MailStore::deleted_uids`] first.
+    ///
+    /// # Errors
+    /// Server errors.
+    fn expunge_all_deleted(&mut self) -> Result<(), Error>;
     /// UIDs in the selected folder whose `Message-ID` header matches.
     ///
     /// # Errors

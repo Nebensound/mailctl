@@ -10,16 +10,17 @@ repository = "https://github.com/Nebensound/mailctl"
 publish = true
 
 [workspace.dependencies]
-clap = { version = "4.6.7", features = ["derive", "env"] }
-imap = "3.0.0-alpha.15"
-imap-proto = "=0.16.7"
+clap = { version = "4.6.8", features = ["derive", "env"] }
+async-imap = { version = "0.12.0", default-features = false, features = ["runtime-tokio"] }
+futures-util = { version = "0.3.34", default-features = false }
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "native-tls", "hostname"] }
 hickory-resolver = "0.26.3"
 mail-parser = "0.11.9"
 native-tls = "0.2.18"
 roxmltree = "0.21.2"
 rpassword = "7.5.5"
-tokio = { version = "1", default-features = false, features = ["rt"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time"] }
+tokio-native-tls = "0.3.1"
 toml_edit = "0.25.19"
 ureq = { version = "3.5.2", default-features = false, features = ["native-tls", "gzip"] }
 serde = { version = "1.0.229", features = ["derive"] }

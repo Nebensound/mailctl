@@ -3,7 +3,12 @@
 //! It lists, shows, moves, marks read, creates folders and forwards to an allow
 //! list. Every change addresses a mail by UID **and** checks its `Message-ID`
 //! (or the stable [`types::MailRef`]) first, and is read back from the server
-//! afterwards. There is deliberately no way to delete mail.
+//! afterwards. There is deliberately no way to delete mail; a move on a server
+//! without `MOVE` removes the original only after its copy is confirmed.
+//!
+//! The library is the implementation of the `mailctl` command line, not a
+//! stable API: releases are versioned by the command line and its JSON output,
+//! and the library can change in any release.
 
 // The coverage job runs on nightly with `--cfg coverage_nightly` and leaves
 // out the few I/O wrappers marked `coverage(off)`, each with its reason.

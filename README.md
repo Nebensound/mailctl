@@ -5,8 +5,11 @@ lists, shows, moves, marks read, creates folders and forwards to an allow
 list. Every command prints JSON on stdout, so scripts and AI agents can drive
 it reliably.
 
-**It never deletes mail.** There is no delete command, and moving refuses to
-fall back to copy-and-expunge on servers without the IMAP `MOVE` extension.
+**It never deletes mail.** There is no delete command. On servers without the
+IMAP `MOVE` extension (iCloud, for example) a move copies the mail and removes
+the original only after its copy is confirmed in the target folder, and,
+without `UIDPLUS`, only when no other mail in the folder is marked for
+deletion (checked right before `EXPUNGE`; see below).
 
 ## Installation
 
@@ -34,6 +37,19 @@ cargo install mailctl --locked
   A move of a mail without `Message-ID` is checked only in the source folder
   (the mail is gone there) and reports `"confirmed": false`: it cannot be
   identified in the target.
+- Servers without `MOVE`: the mail is copied, the copy is confirmed in the
+  target by `Message-ID`, and only then is the original marked `\Deleted` and
+  removed. With `UIDPLUS` exactly this mail is removed (`UID EXPUNGE`). Without
+  `UIDPLUS` a plain `EXPUNGE` would remove every marked mail in the folder, so
+  mailctl refuses the move while any other mail there is marked `\Deleted`,
+  and checks again right before `EXPUNGE`; if another client marked one in
+  between, it takes its own mark back and reports `partly done` (the copy is
+  in the target, the original still in the source). One server round trip
+  remains between that check and `EXPUNGE`. Mails without `Message-ID` cannot
+  be moved this way, because their copy cannot be confirmed. The copy must be
+  a new mail in the target: an existing mail with the same `Message-ID` (a CC
+  to yourself and the list copy share one) is never taken as the copy, so a
+  retry after an interruption leaves a duplicate rather than losing a mail.
 - `--dry-run` checks everything and changes nothing; plans support
   `"dry_run": true`.
 - `forward` only sends to addresses in `forward_allowlist`, refuses mails that
@@ -280,23 +296,36 @@ release smoke test.
   example GreenMail or Dovecot in a container) in CI, then remove the marks
   from the IMAP and SMTP adapters.
 
+## Versioning
+
+The version describes the command line: its commands, options, configuration
+and JSON output. The Rust library in this crate is the implementation of the
+command line, not a stable API; it can change in any release.
+
 ## Releasing
 
-Every merge into `main` publishes a release; nobody sets versions or pushes
-tags by hand.
+Every merge into `main` that changes the shipped program publishes a release;
+nobody sets versions or pushes tags by hand.
 
-- The version is derived from commit messages
-  ([semantic-version](https://github.com/PaulHatch/semantic-version), tags
-  `vX.Y.Z`): include `(MINOR)` in the pull request title, which becomes the
-  squash commit message, for new features and for breaking changes.
-  Everything else is a patch release.
-- The crate stays on `0.x` for now. Under Cargo's semver rules a `0.x` minor
-  bump is already breaking, so breaking changes use `(MINOR)` too. Do not use
-  `(MAJOR)`: it would release `1.0.0`, and the marker cannot be removed from
-  the branch history without rewriting it.
+- The version is derived from [Conventional
+  Commits](https://www.conventionalcommits.org/) with
+  [semantic-version](https://github.com/PaulHatch/semantic-version), tags
+  `vX.Y.Z`: `feat:` releases a minor version, `!` after the type (`feat!:`,
+  `refactor(store)!:`) or a `BREAKING CHANGE:` footer a major version,
+  `fix:`, `perf:`, `deps:` (dependency updates change the shipped binary) and
+  any other type a patch version. `build:`, `ci:`, `docs:`, `test:`,
+  `chore:`, `style:` and `refactor:` release nothing on their own, as usual
+  for Conventional Commits; they go out with the next release. While the
+  major version is 0, everything moves one place, as Cargo treats `0.x`:
+  `!` releases a minor version (`0.1.0` → `0.2.0`), `feat:` and `fix:` a patch
+  version (`0.1.0` → `0.1.1`). The pull
+  request title becomes the squash commit on `main`, so it must carry the
+  type; on the pull request the version is derived from the branch commits,
+  so at least one of them carries it too.
 - On a pull request, CI commits the derived version to `Cargo.toml` and
   `Cargo.lock` on the branch and starts the checks again for that commit. A
-  version raised by hand is kept if it is higher. On `main`, CI only verifies
+  version raised by hand is kept if it is higher; a version this job set
+  earlier is derived again and can go down. On `main`, CI only verifies
   that the tree carries the derived version.
 - After all checks pass on `main`, CI builds the binaries, publishes the crate
   to crates.io and then creates the tag and the GitHub release with the

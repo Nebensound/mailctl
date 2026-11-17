@@ -8,7 +8,8 @@ use crate::error::Error;
 use crate::forward::{self, ForwardRequest};
 use crate::model::{self, MailDetail, MailSummary};
 use crate::store::{
-    FLAG_FORWARDED, FLAG_SEEN, FolderInfo, MailSender, MailStore, RawHeader, has_flag,
+    FLAG_DELETED, FLAG_FORWARDED, FLAG_SEEN, FolderInfo, MailSender, MailStore, MoveSupport,
+    RawHeader, has_flag,
 };
 use crate::types::{EmailAddress, Expect, MailboxName, MessageId, Uid};
 
@@ -247,11 +248,46 @@ fn newest_with_id(
         .max_by_key(|h| h.uid))
 }
 
+/// Selects `folder` and returns its highest UID, if it holds any mail.
+fn newest_uid(store: &mut dyn MailStore, folder: &MailboxName) -> Result<Option<Uid>, Error> {
+    store.select(folder)?;
+    Ok(store.uids()?.into_iter().max())
+}
+
+/// Selects `folder` and returns the newest mail above `after` whose
+/// `Message-ID` is exactly `id`. Reads the headers of those mails instead of
+/// using the server's header search.
+fn newest_with_id_above(
+    store: &mut dyn MailStore,
+    folder: &MailboxName,
+    id: &MessageId,
+    after: Option<Uid>,
+) -> Result<Option<RawHeader>, Error> {
+    store.select(folder)?;
+    let newer: Vec<Uid> = store
+        .uids()?
+        .into_iter()
+        .filter(|&u| Some(u) > after)
+        .collect();
+    Ok(store
+        .headers(&newer)?
+        .into_iter()
+        .filter(|h| model::summary_from_header(h).message_id.as_ref() == Some(id))
+        .max_by_key(|h| h.uid))
+}
+
 /// Moves a mail to another folder of the same account, optionally marking it read first.
 ///
+/// Servers without `MOVE` get a copy, which is confirmed in the target before
+/// the original is marked `\Deleted` and removed: with `UIDPLUS` exactly this
+/// mail (`UID EXPUNGE`), otherwise with a plain `EXPUNGE` only when no other
+/// mail in the folder is marked.
+///
 /// # Errors
-/// [`Error::FolderMissing`], [`Error::MoveUnsupported`], [`Error::NotFound`],
-/// [`Error::MessageIdMismatch`], [`Error::NotConfirmed`] or server errors.
+/// [`Error::FolderMissing`], [`Error::MoveUnsupported`],
+/// [`Error::OthersMarkedDeleted`], [`Error::NotFound`],
+/// [`Error::MessageIdMismatch`], [`Error::NotConfirmed`], [`Error::Partial`]
+/// or server errors.
 pub fn move_mail(
     store: &mut dyn MailStore,
     folder: &MailboxName,
@@ -262,24 +298,44 @@ pub fn move_mail(
     dry_run: bool,
 ) -> Result<ActionReport, Error> {
     require_folder(store, target)?;
-    if !store.supports_move()? {
-        return Err(Error::MoveUnsupported);
-    }
+    let support = store.move_support()?;
     open(store, folder, dry_run)?;
     let mail = verify(store, uid, expect)?;
+    // Without MOVE the copy is identified by Message-ID.
+    let copy_id = match support {
+        MoveSupport::Move => None,
+        _ => Some(check_copy_fallback(
+            store,
+            folder,
+            uid,
+            mail.message_id.as_ref(),
+            support,
+        )?),
+    };
     let mut confirmed = false;
     if !dry_run {
         if mark_read_first {
             store.add_flags(uid, &[FLAG_SEEN])?;
         }
-        store.move_to(uid, target)?;
-        // The source folder is still selected after MOVE.
+        match copy_id {
+            None => store.move_to(uid, target)?,
+            Some(id) => {
+                let flag = mark_read_first.then_some(FLAG_SEEN);
+                move_by_copy(store, folder, uid, id, target, flag, support)?;
+            }
+        }
+        // The source folder is selected again after the move.
         if !store.headers(&[uid])?.is_empty() {
             return Err(Error::NotConfirmed(format!("UID {uid} still in {folder}")));
         }
-        // Without a Message-ID the mail cannot be found again in the target:
-        // it left the source, but that is not confirmed as filed.
-        if let Some(id) = &mail.message_id {
+        if copy_id.is_some() {
+            // The copy was confirmed by its new UID before the original was
+            // removed; servers without MOVE (iCloud) may not answer a header
+            // search, so it is not looked up again.
+            confirmed = true;
+        } else if let Some(id) = &mail.message_id {
+            // Without a Message-ID the mail cannot be found again in the
+            // target: it left the source, but that is not confirmed as filed.
             let flag = mark_read_first.then_some(FLAG_SEEN);
             confirm_in_folder(store, target, id, flag)?;
             confirmed = true;
@@ -292,6 +348,83 @@ pub fn move_mail(
         dry_run,
         confirmed,
     })
+}
+
+/// Whether a mail can be moved without `MOVE`: its copy must be identifiable
+/// by `Message-ID`, and without `UIDPLUS` no other mail in the folder may be
+/// marked `\Deleted`, because a plain `EXPUNGE` would remove it too. The
+/// mail's own mark, left by an interrupted attempt, does not count.
+fn check_copy_fallback<'a>(
+    store: &mut dyn MailStore,
+    folder: &MailboxName,
+    uid: Uid,
+    id: Option<&'a MessageId>,
+    support: MoveSupport,
+) -> Result<&'a MessageId, Error> {
+    let id = id.ok_or(Error::MoveUnsupported)?;
+    if support == MoveSupport::CopyExpunge {
+        let count = store
+            .deleted_uids()?
+            .into_iter()
+            .filter(|&d| d != uid)
+            .count();
+        if count > 0 {
+            return Err(Error::OthersMarkedDeleted {
+                folder: folder.to_string(),
+                count,
+            });
+        }
+    }
+    Ok(id)
+}
+
+/// Moves a mail on a server without `MOVE`. The original is only removed once
+/// its own copy is confirmed in the target: a mail with this `Message-ID`
+/// above every UID the target had before the copy. An existing one is never
+/// taken as the copy, because two different mails can share a `Message-ID` (a
+/// CC to oneself and the list copy); a retry after an interruption leaves a
+/// duplicate instead. The copy is found by UID, not by the server's header
+/// search, which some servers without `MOVE` (iCloud) never match.
+fn move_by_copy(
+    store: &mut dyn MailStore,
+    folder: &MailboxName,
+    uid: Uid,
+    id: &MessageId,
+    target: &MailboxName,
+    flag: Option<&str>,
+    support: MoveSupport,
+) -> Result<(), Error> {
+    // UIDs only grow within a folder, so the copy is above everything before.
+    let before = newest_uid(store, target)?;
+    store.select(folder)?;
+    store.copy_to(uid, target)?;
+    let Some(copy) = newest_with_id_above(store, target, id, before)? else {
+        return Err(Error::NotConfirmed(format!(
+            "no new copy of {id} in {target}"
+        )));
+    };
+    if let Some(flag) = flag
+        && !has_flag(&copy.flags, flag)
+    {
+        return Err(Error::NotConfirmed(format!(
+            "{flag} not set on the copy of {id} in {target}"
+        )));
+    }
+    store.select(folder)?;
+    store.add_flags(uid, &[FLAG_DELETED])?;
+    if support == MoveSupport::CopyUidExpunge {
+        return store.expunge_uid(uid);
+    }
+    // Checked before the copy; checked again right before EXPUNGE in case
+    // another client marked a mail in between.
+    let deleted = store.deleted_uids()?;
+    if deleted != [uid] {
+        store.remove_flags(uid, &[FLAG_DELETED])?;
+        return Err(Error::Partial(format!(
+            "copied to {target}, but the original stays in {folder}: another mail there was marked deleted meanwhile, so EXPUNGE would remove it too"
+        )));
+    }
+    store.expunge_all_deleted()
 }
 
 /// Creates a folder if it does not exist yet.
@@ -327,15 +460,17 @@ pub fn create_folder(
 
 /// After sending: flags the original as `$Forwarded` and stores the copy in
 /// the sent folder, and confirms both. The copy does not depend on the flag:
-/// both steps run, and every failure is reported.
+/// both steps run, and every failure is reported. `sent_before` is the sent
+/// folder's highest UID before sending.
 fn record_forward(
     store: &mut dyn MailStore,
     job: &ForwardJob<'_>,
     bytes: &[u8],
+    sent_before: Option<Uid>,
 ) -> Result<(), Error> {
     let flagged = flag_forwarded(store, job);
     let copied = match job.sent_folder {
-        Some(sent) => copy_unless_filed(store, sent, job.new_message_id, bytes),
+        Some(sent) => copy_unless_filed(store, sent, job.new_message_id, bytes, sent_before),
         None => Ok(()),
     };
     match (flagged, copied) {
@@ -346,18 +481,26 @@ fn record_forward(
 }
 
 /// Stores the copy in the sent folder, unless the SMTP server has filed one
-/// there itself (as Gmail and Microsoft 365 do), and confirms it.
+/// there itself (as Gmail and Microsoft 365 do), and confirms it. A copy is
+/// a mail with this `Message-ID` above `before`, the folder's highest UID
+/// before sending, read from its headers. No header search: some servers
+/// (iCloud) never match one, and the `Message-ID` is new for this forward,
+/// so no mail at or below `before` can carry it.
 fn copy_unless_filed(
     store: &mut dyn MailStore,
     sent: &MailboxName,
     id: &MessageId,
     bytes: &[u8],
+    before: Option<Uid>,
 ) -> Result<(), Error> {
-    if newest_with_id(store, sent, id)?.is_some() {
+    if newest_with_id_above(store, sent, id, before)?.is_some() {
         return Ok(());
     }
     store.append(sent, bytes, &[FLAG_SEEN])?;
-    confirm_in_folder(store, sent, id, None)
+    if newest_with_id_above(store, sent, id, before)?.is_none() {
+        return Err(Error::NotConfirmed(format!("{id} not found in {sent}")));
+    }
+    Ok(())
 }
 
 fn flag_forwarded(store: &mut dyn MailStore, job: &ForwardJob<'_>) -> Result<(), Error> {
@@ -438,11 +581,23 @@ pub fn forward(
     }
     let mut confirmed = false;
     if !job.dry_run {
+        // The sent folder's highest UID before sending: a copy above it is
+        // new and is found without the server's header search, which some
+        // servers (iCloud) never match. Reading it selects the sent folder,
+        // so the original's folder is selected again for the flag.
+        let sent_before = match job.sent_folder {
+            Some(sent) => {
+                let newest = newest_uid(store, sent)?;
+                store.select(job.folder)?;
+                newest
+            }
+            None => None,
+        };
         sender.send(job.from, job.to, &bytes)?;
         // The mail is out. Flag the original first, so a retry is refused as
         // `AlreadyForwarded` even if storing the copy fails; report anything
         // that fails from here on as partly done instead of as a plain error.
-        record_forward(store, job, &bytes).map_err(|e| {
+        record_forward(store, job, &bytes, sent_before).map_err(|e| {
             Error::Partial(format!(
                 "UID {} was forwarded to {}, but {e}",
                 job.uid, job.to
