@@ -308,10 +308,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    # Releases are published one after another, never in parallel.
-    concurrency:
-      group: publish
-      cancel-in-progress: false
+    # No concurrency group: GitHub keeps only one pending job per group, so a
+    # shared group would drop the publish of a merge in between. Both steps
+    # below are idempotent, so overlapping runs cannot publish twice; in the
+    # rare case that two runs race for the same version, one fails and a
+    # re-run completes it.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
