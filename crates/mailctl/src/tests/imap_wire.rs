@@ -1,7 +1,5 @@
 //! Tests for `imap_wire`.
 
-use std::borrow::Cow;
-
 use super::*;
 
 /// Parses one complete server response line.
@@ -9,50 +7,6 @@ fn parse(line: &str) -> Result<Response<'_>, String> {
     match Response::parse(line.as_bytes()) {
         Ok(([], response)) => Ok(response),
         other => Err(format!("not one complete response: {line:?} -> {other:?}")),
-    }
-}
-
-#[test]
-fn names_every_flag() {
-    let names: Vec<String> = [
-        Flag::Seen,
-        Flag::Answered,
-        Flag::Flagged,
-        Flag::Deleted,
-        Flag::Draft,
-        Flag::Recent,
-        Flag::MayCreate,
-        Flag::Custom(Cow::Borrowed("$Forwarded")),
-    ]
-    .iter()
-    .map(flag_name)
-    .collect();
-    assert_eq!(
-        names,
-        [
-            "\\Seen",
-            "\\Answered",
-            "\\Flagged",
-            "\\Deleted",
-            "\\Draft",
-            "\\Recent",
-            "\\*",
-            "$Forwarded"
-        ]
-    );
-}
-
-#[test]
-fn flag_names_round_trip_through_the_parser() {
-    for name in [
-        "\\Seen",
-        "\\Answered",
-        "\\Flagged",
-        "\\Draft",
-        "\\*",
-        "$Forwarded",
-    ] {
-        assert_eq!(flag_name(&Flag::from(name)), name);
     }
 }
 
@@ -186,40 +140,115 @@ fn quotes_mailbox_names() -> Result<(), crate::error::Error> {
 }
 
 #[test]
-fn select_reader_follows_a_select() -> Result<(), String> {
-    let run = |lines: &[&str]| -> Result<Vec<Option<Result<bool, String>>>, String> {
-        let mut reader = SelectReader::new(RequestId("A3".to_owned()));
-        lines
-            .iter()
-            .map(|line| Ok(reader.feed(&parse(line)?)))
-            .collect()
+fn select_keywords_follow_the_permanent_flags() -> Result<(), String> {
+    let allowed = |lines: &[&str]| -> Result<bool, String> {
+        let mut select = SelectKeywords::default();
+        for line in lines {
+            select.see(&parse(line)?);
+        }
+        Ok(select.allowed())
     };
     // Without PERMANENTFLAGS every flag is permanent.
-    assert_eq!(
-        run(&[
-            "* FLAGS (\\Seen \\Flagged)\r\n",
-            "* 3 EXISTS\r\n",
-            "A3 OK [READ-WRITE] SELECT completed\r\n",
-        ])?,
-        [None, None, Some(Ok(true))]
-    );
-    // An explicit empty list on an untagged response counts at completion.
-    assert_eq!(
-        run(&[
-            "* OK [PERMANENTFLAGS ()] No permanent flags\r\n",
-            "A3 OK [READ-WRITE] SELECT completed\r\n",
-        ])?,
-        [None, Some(Ok(false))]
-    );
+    assert!(allowed(&[
+        "* FLAGS (\\Seen \\Flagged)\r\n",
+        "* 3 EXISTS\r\n",
+        "A3 OK [READ-WRITE] SELECT completed\r\n",
+    ])?);
+    // An explicit empty list means none is.
+    assert!(!allowed(&[
+        "* OK [PERMANENTFLAGS ()] No permanent flags\r\n",
+        "A3 OK [READ-WRITE] SELECT completed\r\n",
+    ])?);
     // A code on the tagged completion itself counts too.
+    assert!(allowed(&[
+        "A3 OK [PERMANENTFLAGS (\\Seen \\*)] SELECT completed\r\n"
+    ])?);
+    Ok(())
+}
+
+#[test]
+fn a_missing_response_is_an_error() {
+    assert_eq!(received(Ok(Some(7))), Ok(7));
     assert_eq!(
-        run(&["A3 OK [PERMANENTFLAGS (\\Seen \\*)] SELECT completed\r\n"])?,
-        [Some(Ok(true))]
+        received::<u8>(Ok(None)),
+        Err("the server closed the connection".to_owned())
     );
-    // A refused SELECT reports the server's reason.
+    let eof = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
     assert_eq!(
-        run(&["A3 NO No such mailbox\r\n"])?,
-        [Some(Err("No: No such mailbox".to_owned()))]
+        received::<u8>(Err(eof)),
+        Err("the server closed the connection".to_owned())
     );
+    let closed = std::io::Error::other("connection closed gracefully");
+    assert_eq!(
+        received::<u8>(Err(closed)),
+        Err("connection closed gracefully".to_owned())
+    );
+}
+
+#[test]
+fn reads_folders_from_list_responses() -> Result<(), String> {
+    let folder = listed_folder(&parse(
+        "* LIST (\\HasNoChildren \\Sent) \".\" \"INBOX.Beh&APY-rden\"\r\n",
+    )?)
+    .ok_or("no folder")?;
+    assert_eq!(folder.name.as_str(), "INBOX.Behörden");
+    assert_eq!(folder.delimiter.as_deref(), Some("."));
+    assert!(folder.selectable);
+    assert_eq!(folder.special_use.as_deref(), Some("sent"));
+
+    let parent =
+        listed_folder(&parse("* LIST (\\Noselect) NIL \"Archive\"\r\n")?).ok_or("no folder")?;
+    assert!(!parent.selectable);
+    assert_eq!(parent.delimiter, None);
+    assert_eq!(parent.special_use, None);
+
+    // Not modified UTF-7: skipped.
+    assert!(listed_folder(&parse("* LIST () \"/\" \"Bad&Name\"\r\n")?).is_none());
+    assert!(listed_folder(&parse("* 3 EXISTS\r\n")?).is_none());
+    Ok(())
+}
+
+#[test]
+fn reads_the_requested_attributes_of_a_fetch() -> Result<(), String> {
+    let header = fetched(&parse(
+        "* 2 FETCH (UID 7 FLAGS (\\Seen $Forwarded) RFC822.SIZE 42 BODY[HEADER] {13}\r\nSubject: Hi\r\n)\r\n",
+    )?);
+    assert_eq!(
+        header,
+        Some(Fetched {
+            uid: Some(7),
+            flags: vec!["\\Seen".to_owned(), "$Forwarded".to_owned()],
+            size: Some(42),
+            header: Some(b"Subject: Hi\r\n".to_vec()),
+            body: None,
+        })
+    );
+    let body = fetched(&parse(
+        "* 2 FETCH (UID 7 BODY[] {5}\r\nHello INTERNALDATE \"17-Nov-2026 10:00:00 +0000\")\r\n",
+    )?)
+    .ok_or("no fetch")?;
+    assert_eq!(body.body.as_deref(), Some(&b"Hello"[..]));
+    // A flag change another client made comes without UID.
+    let unasked = fetched(&parse("* 1 FETCH (FLAGS (\\Seen))\r\n")?).ok_or("no fetch")?;
+    assert_eq!(unasked.uid, None);
+    assert_eq!(fetched(&parse("* SEARCH 1 2\r\n")?), None);
+    Ok(())
+}
+
+#[test]
+fn reads_search_results() -> Result<(), String> {
+    assert_eq!(searched(&parse("* SEARCH 2 84 882\r\n")?), [2, 84, 882]);
+    assert_eq!(searched(&parse("* SEARCH\r\n")?), Vec::<u32>::new());
+    assert_eq!(searched(&parse("* 3 EXISTS\r\n")?), Vec::<u32>::new());
+    Ok(())
+}
+
+#[test]
+fn finds_capabilities() -> Result<(), String> {
+    let capabilities = parse("* CAPABILITY IMAP4rev1 UIDPLUS move AUTH=PLAIN\r\n")?;
+    assert!(has_capability(&capabilities, "UIDPLUS"));
+    assert!(has_capability(&capabilities, "MOVE"));
+    assert!(!has_capability(&capabilities, "PLAIN"));
+    assert!(!has_capability(&parse("* 3 EXISTS\r\n")?, "MOVE"));
     Ok(())
 }

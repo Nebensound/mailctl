@@ -3,6 +3,7 @@
 //! provider profile each.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::Parser as _;
 use serde_json::Value;
@@ -10,13 +11,16 @@ use serde_json::Value;
 use crate::adapters::imap::ImapStore;
 use crate::adapters::net::Trust;
 use crate::adapters::smtp::SmtpSender;
+use crate::adapters::system::SystemBackend;
 use crate::cli::{Backend, Cli, run};
-use crate::config::{AccountConfig, Secret, SecretLookup};
+use crate::config::{AccountConfig, Config, Secret, SecretLookup};
 use crate::discover::Net;
 use crate::error::Error;
 use crate::store::{MailSender, MailStore};
 use crate::test_server::TestCa;
-use crate::test_server::imap::{DOVECOT, ICLOUD, ImapServer, PASSWORD, Profile, RFC3501, USER};
+use crate::test_server::imap::{
+    DOVECOT, Fault, ICLOUD, ImapServer, PASSWORD, Profile, RFC3501, USER,
+};
 use crate::test_server::smtp::{Accepted, Mode, SmtpServer};
 
 /// The only recipient on the forward allow list.
@@ -30,8 +34,11 @@ struct E2e {
     /// The account's sent folder.
     sent: String,
     plan: String,
-    /// Trust the system roots instead of the servers' CA.
+    /// Connect as in production, trusting the system roots instead of the
+    /// servers' CA.
     system_trust: bool,
+    /// Time limit of each IMAP step.
+    io_timeout: Duration,
     /// The password mailctl finds for the account.
     password: String,
 }
@@ -47,6 +54,7 @@ impl E2e {
             sent: sent.to_owned(),
             plan: String::new(),
             system_trust: false,
+            io_timeout: Duration::from_secs(5),
             password: PASSWORD.to_owned(),
         })
     }
@@ -88,10 +96,21 @@ access = "send"
     }
 
     fn trust(&self) -> Trust {
+        Trust::Only(self.ca.pem.clone())
+    }
+
+    /// The account as mailctl reads it from the configuration.
+    fn account(&self) -> Result<AccountConfig, String> {
+        Config::parse(&self.config())
+            .and_then(|config| config.account("mail").cloned())
+            .map_err(|e| e.to_string())
+    }
+
+    fn smtp_sender(&self, account: &AccountConfig, secret: &Secret) -> Result<SmtpSender, Error> {
         if self.system_trust {
-            Trust::System
+            SmtpSender::new(account, secret)
         } else {
-            Trust::Only(self.ca.pem.clone())
+            SmtpSender::new_with(account, secret, &self.trust())
         }
     }
 
@@ -219,11 +238,11 @@ impl Backend for E2e {
         account: &AccountConfig,
         secret: &Secret,
     ) -> Result<Box<dyn MailStore>, Error> {
-        Ok(Box::new(ImapStore::connect_with(
-            account,
-            secret,
-            &self.trust(),
-        )?))
+        Ok(Box::new(if self.system_trust {
+            ImapStore::connect(account, secret)?
+        } else {
+            ImapStore::connect_with(account, secret, &self.trust(), self.io_timeout)?
+        }))
     }
     fn sender(
         &self,
@@ -270,7 +289,7 @@ impl Backend for E2e {
         Box::new(crate::discover::tests::FakeNet::default())
     }
     fn check_smtp(&self, account: &AccountConfig, secret: &Secret) -> Result<(), Error> {
-        SmtpSender::new_with(account, secret, &self.trust())?.check()
+        self.smtp_sender(account, secret)?.check()
     }
 }
 
@@ -496,11 +515,26 @@ fn apply_runs_a_plan_over_one_connection() -> Result<(), String> {
 
 #[test]
 fn a_certificate_outside_the_trust_is_refused() -> Result<(), String> {
-    let mut e2e = E2e::dovecot()?;
+    // Production connects with the system roots, which do not hold the
+    // test CA.
+    let mut e2e = E2e::dovecot()?.with_smtp(Mode::Tls, false)?;
     e2e.system_trust = true;
     let (out, code) = e2e.run(&["folders", "-a", "mail"])?;
     assert_ne!(code, 0, "{out}");
     assert_eq!(e2e.count("LOGIN")?, 0);
+    // The production backend does the same.
+    let (account, secret) = (e2e.account()?, Secret::new(PASSWORD.to_owned()));
+    let system = SystemBackend;
+    assert!(matches!(
+        system.connect(&account, &secret),
+        Err(Error::Store(_))
+    ));
+    let sender = system.sender(&account, &secret);
+    assert!(sender.is_ok(), "the transport connects only on send");
+    assert!(matches!(
+        system.check_smtp(&account, &secret),
+        Err(Error::Send(_))
+    ));
     Ok(())
 }
 
@@ -621,5 +655,269 @@ fn account_test_logs_in_to_imap_and_smtp() -> Result<(), String> {
         assert_eq!(code, 0, "{mode:?}: {out}");
         assert!(e2e.accepted()?.is_empty());
     }
+    Ok(())
+}
+
+/// A mailbox with two mails in the inbox and an SMTP server.
+fn with_mail(e2e: E2e, mode: Mode) -> Result<E2e, String> {
+    let e2e = e2e.with_smtp(mode, false)?;
+    e2e.add("INBOX", "a@example.com", "Invoice", &[])?;
+    e2e.add("INBOX", "b@example.com", "News", &[])?;
+    Ok(e2e)
+}
+
+fn dovecot_mail() -> Result<E2e, String> {
+    with_mail(E2e::dovecot()?, Mode::StartTls)
+}
+
+fn icloud_mail() -> Result<E2e, String> {
+    with_mail(E2e::icloud()?, Mode::Tls)
+}
+
+fn rfc3501_mail() -> Result<E2e, String> {
+    with_mail(E2e::rfc3501()?, Mode::StartTls)
+}
+
+/// A command line run on a fresh set of servers.
+struct Scenario {
+    setup: fn() -> Result<E2e, String>,
+    args: &'static [&'static str],
+}
+
+const UID_1: [&str; 6] = ["-a", "mail", "--uid", "1", "--expect", "a@example.com"];
+
+const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        setup: dovecot_mail,
+        args: &["folders", "-a", "mail"],
+    },
+    Scenario {
+        setup: dovecot_mail,
+        args: &["list", "-a", "mail"],
+    },
+    Scenario {
+        setup: dovecot_mail,
+        args: &["show", "-a", "mail", "--uid", "1"],
+    },
+    Scenario {
+        setup: dovecot_mail,
+        args: &[
+            "mark-read",
+            UID_1[0],
+            UID_1[1],
+            UID_1[2],
+            UID_1[3],
+            UID_1[4],
+            UID_1[5],
+        ],
+    },
+    Scenario {
+        setup: dovecot_mail,
+        args: &[
+            "move",
+            UID_1[0],
+            UID_1[1],
+            UID_1[2],
+            UID_1[3],
+            UID_1[4],
+            UID_1[5],
+            "--to",
+            "INBOX.Archive",
+        ],
+    },
+    Scenario {
+        setup: dovecot_mail,
+        args: &["create-folder", "-a", "mail", "INBOX.New"],
+    },
+    Scenario {
+        setup: dovecot_mail,
+        args: &[
+            "forward", UID_1[0], UID_1[1], UID_1[2], UID_1[3], UID_1[4], UID_1[5], "--to",
+            ACCOUNTING,
+        ],
+    },
+    Scenario {
+        setup: icloud_mail,
+        args: &[
+            "move", UID_1[0], UID_1[1], UID_1[2], UID_1[3], UID_1[4], UID_1[5], "--to", "Archive",
+        ],
+    },
+    Scenario {
+        setup: icloud_mail,
+        args: &[
+            "forward", UID_1[0], UID_1[1], UID_1[2], UID_1[3], UID_1[4], UID_1[5], "--to",
+            ACCOUNTING,
+        ],
+    },
+    Scenario {
+        setup: rfc3501_mail,
+        args: &[
+            "move", UID_1[0], UID_1[1], UID_1[2], UID_1[3], UID_1[4], UID_1[5], "--to", "Archive",
+        ],
+    },
+];
+
+#[test]
+fn every_failed_imap_command_fails_the_command_line() -> Result<(), String> {
+    for scenario in SCENARIOS {
+        let baseline = (scenario.setup)()?;
+        let (out, code) = baseline.run(scenario.args)?;
+        assert_eq!(code, 0, "{:?}: {out}", scenario.args);
+        for (index, command) in baseline.server.commands()?.iter().enumerate() {
+            if command == "LOGOUT" {
+                continue;
+            }
+            for fault in [Fault::No, Fault::Close] {
+                let e2e = (scenario.setup)()?;
+                e2e.server.fail_at(index, fault)?;
+                let (out, code) = e2e.run(scenario.args)?;
+                assert_ne!(
+                    code, 0,
+                    "{:?} with {fault:?} at {command} ({index}): {out}",
+                    scenario.args
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_stalled_server_times_out_and_the_connection_is_given_up() -> Result<(), String> {
+    let baseline = dovecot_mail()?;
+    baseline.run(&["list", "-a", "mail"])?;
+    let fetch = baseline
+        .server
+        .commands()?
+        .iter()
+        .position(|c| c == "UID FETCH")
+        .ok_or("no UID FETCH")?;
+
+    let mut e2e = dovecot_mail()?;
+    e2e.io_timeout = Duration::from_millis(300);
+    e2e.server.fail_at(fetch, Fault::Stall)?;
+    let (out, code) = e2e.run(&["list", "-a", "mail"])?;
+    assert_ne!(code, 0, "{out}");
+    assert!(out.to_string().contains("did not answer in time"), "{out}");
+    // The answer may still arrive, so not even LOGOUT is sent any more.
+    assert_eq!(e2e.count("LOGOUT")?, 0);
+    Ok(())
+}
+
+#[test]
+fn a_connection_closed_before_the_greeting_is_reported() -> Result<(), String> {
+    let e2e = E2e::dovecot()?;
+    e2e.server.close_before_greeting()?;
+    let (out, code) = e2e.run(&["folders", "-a", "mail"])?;
+    assert_ne!(code, 0, "{out}");
+    assert!(out.to_string().contains("before the greeting"), "{out}");
+    Ok(())
+}
+
+#[test]
+fn a_refused_connection_is_reported() -> Result<(), String> {
+    let e2e = E2e::dovecot()?;
+    let mut account = e2e.account()?;
+    // A port that was free a moment ago and has no listener now.
+    account.imap_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map_err(|e| e.to_string())?
+        .port();
+    let secret = Secret::new(PASSWORD.to_owned());
+    let result = ImapStore::connect_with(&account, &secret, &e2e.trust(), e2e.io_timeout);
+    assert!(matches!(result, Err(Error::Store(_))));
+    Ok(())
+}
+
+#[test]
+fn an_unreadable_certificate_authority_is_refused() -> Result<(), String> {
+    let e2e = E2e::dovecot()?;
+    let account = e2e.account()?;
+    let secret = Secret::new(PASSWORD.to_owned());
+    let garbage = Trust::Only(b"not a certificate".to_vec());
+    let imap = ImapStore::connect_with(&account, &secret, &garbage, e2e.io_timeout);
+    assert!(matches!(imap, Err(Error::Store(_))));
+    let smtp = SmtpSender::new_with(&account, &secret, &garbage);
+    assert!(matches!(smtp, Err(Error::Send(_))));
+    Ok(())
+}
+
+#[test]
+fn a_flag_change_sent_along_with_a_fetch_is_not_taken_for_a_mail() -> Result<(), String> {
+    let e2e = dovecot_mail()?;
+    e2e.server.send_unsolicited_fetch()?;
+    let (list, code) = e2e.run(&["list", "-a", "mail"])?;
+    assert_eq!(code, 0, "{list}");
+    assert_eq!(list.as_array().map(Vec::len), Some(2), "{list}");
+    let (shown, code) = e2e.run(&["show", "-a", "mail", "--uid", "2"])?;
+    assert_eq!(code, 0, "{shown}");
+    assert_eq!(at(&shown, "/subject"), "News");
+    Ok(())
+}
+
+#[test]
+fn a_folder_name_that_is_not_modified_utf7_is_skipped() -> Result<(), String> {
+    let e2e = E2e::new(
+        RFC3501,
+        &[("INBOX", ""), ("Bad&Name", ""), ("Sent", "")],
+        "Sent",
+    )?;
+    let (folders, code) = e2e.run(&["folders", "-a", "mail"])?;
+    assert_eq!(code, 0, "{folders}");
+    let names: Vec<&Value> = folders
+        .as_array()
+        .map(|list| list.iter().map(|f| at(f, "/name")).collect())
+        .unwrap_or_default();
+    assert_eq!(names, ["INBOX", "Sent"]);
+    Ok(())
+}
+
+#[test]
+fn a_failed_smtp_connection_test_is_reported() -> Result<(), String> {
+    let e2e = E2e::dovecot()?.with_smtp(Mode::StartTls, false)?;
+    e2e.smtp.as_ref().ok_or("no SMTP server")?.0.refuse_noop();
+    let (out, code) = e2e.run(&["account", "test", "-a", "mail", "--smtp"])?;
+    assert_ne!(code, 0, "{out}");
+    assert!(out.to_string().contains("connection test failed"), "{out}");
+    Ok(())
+}
+
+#[test]
+fn move_without_uidplus_keeps_the_original_when_another_mail_is_deleted_meanwhile()
+-> Result<(), String> {
+    let args = [
+        "move",
+        "-a",
+        "mail",
+        "--uid",
+        "1",
+        "--expect",
+        "a@example.com",
+        "--to",
+        "Archive",
+    ];
+    let baseline = rfc3501_mail()?;
+    baseline.run(&args)?;
+    // Another client marks mail 2 deleted right after mailctl marked its own.
+    let store = baseline
+        .server
+        .commands()?
+        .iter()
+        .position(|c| c == "UID STORE")
+        .ok_or("no UID STORE")?;
+
+    let e2e = rfc3501_mail()?;
+    e2e.server
+        .delete_meanwhile(store.saturating_add(1), "INBOX", 2)?;
+    let (out, code) = e2e.run(&args)?;
+    assert_ne!(code, 0, "{out}");
+    assert!(
+        out.to_string().contains("marked deleted meanwhile"),
+        "{out}"
+    );
+    assert_eq!(e2e.flags("INBOX", "a@example.com")?, Vec::<String>::new());
+    assert_eq!(e2e.flags("INBOX", "b@example.com")?, [r"\Deleted"]);
+    assert_eq!(e2e.ids("Archive")?, ["<a@example.com>"]);
+    assert_eq!(e2e.count("EXPUNGE")?, 0);
     Ok(())
 }

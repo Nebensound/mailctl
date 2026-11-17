@@ -81,6 +81,17 @@ pub(crate) const RFC3501: Profile = Profile {
     examine_permanent: None,
 };
 
+/// A failure the server plays instead of answering a command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fault {
+    /// Answer `NO`.
+    No,
+    /// Never answer, as a stalled server.
+    Stall,
+    /// Close the connection cleanly (TLS `close_notify`).
+    Close,
+}
+
 /// One stored mail.
 #[derive(Clone, Debug)]
 pub(crate) struct Message {
@@ -127,6 +138,16 @@ struct State {
     commands: Vec<String>,
     /// `LOGIN` takes any password for [`USER`].
     any_password: bool,
+    /// The fault played at the command with this index in `commands`.
+    fault: Option<(usize, Fault)>,
+    /// Close each connection before the greeting.
+    close_before_greeting: bool,
+    /// Before the command with this index, mark this mail deleted, as
+    /// another client would meanwhile: folder and UID.
+    delete_meanwhile: Option<(usize, String, u32)>,
+    /// Send a flag change without UID along with every `UID FETCH`, as a
+    /// server does when another client changed a flag meanwhile.
+    unsolicited_fetch: bool,
 }
 
 fn lock(state: &Mutex<State>) -> Result<MutexGuard<'_, State>, String> {
@@ -162,6 +183,10 @@ impl ImapServer {
                 .collect(),
             commands: Vec::new(),
             any_password: false,
+            fault: None,
+            close_before_greeting: false,
+            delete_meanwhile: None,
+            unsolicited_fetch: false,
         }));
         let shared = Arc::clone(&state);
         let config = Arc::clone(&ca.config);
@@ -217,6 +242,37 @@ impl ImapServer {
     /// Lets `LOGIN` take any password, so that a test can fail SMTP alone.
     pub(crate) fn accept_any_password(&self) -> Result<(), String> {
         lock(&self.state)?.any_password = true;
+        Ok(())
+    }
+
+    /// Plays `fault` at the command with this index (counted over all
+    /// connections, as in [`Self::commands`]).
+    pub(crate) fn fail_at(&self, index: usize, fault: Fault) -> Result<(), String> {
+        lock(&self.state)?.fault = Some((index, fault));
+        Ok(())
+    }
+
+    /// Marks a mail deleted right before the command with this index, as
+    /// another client would meanwhile.
+    pub(crate) fn delete_meanwhile(
+        &self,
+        index: usize,
+        folder: &str,
+        uid: u32,
+    ) -> Result<(), String> {
+        lock(&self.state)?.delete_meanwhile = Some((index, folder.to_owned(), uid));
+        Ok(())
+    }
+
+    /// Closes each connection right after the TLS handshake.
+    pub(crate) fn close_before_greeting(&self) -> Result<(), String> {
+        lock(&self.state)?.close_before_greeting = true;
+        Ok(())
+    }
+
+    /// Sends a flag change without UID along with every `UID FETCH`.
+    pub(crate) fn send_unsolicited_fetch(&self) -> Result<(), String> {
+        lock(&self.state)?.unsolicited_fetch = true;
         Ok(())
     }
 
@@ -395,6 +451,19 @@ fn send(stream: &mut Stream, line: &[u8]) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Ends the connection cleanly, after completing the TLS handshake if no
+/// byte was exchanged yet.
+fn close(stream: &mut Stream) -> Result<(), String> {
+    let out = stream.get_mut();
+    while out.conn.is_handshaking() {
+        out.conn
+            .complete_io(&mut out.sock)
+            .map_err(|e| e.to_string())?;
+    }
+    out.conn.send_close_notify();
+    out.flush().map_err(|e| e.to_string())
+}
+
 /// Reads one line without CRLF; `None` at the end of the connection.
 fn read_line(stream: &mut Stream) -> Result<Option<String>, String> {
     let mut line = Vec::new();
@@ -444,6 +513,9 @@ const FETCH_ITEMS: [&str; 7] = [
 
 impl Session<'_> {
     fn run(&mut self, stream: &mut Stream) -> Result<(), String> {
+        if lock(self.state)?.close_before_greeting {
+            return close(stream);
+        }
         send(stream, b"* OK [CAPABILITY IMAP4rev1] scripted server ready")?;
         while let Some(line) = read_line(stream)? {
             let (tag, rest) = line.split_once(' ').unwrap_or((line.as_str(), ""));
@@ -461,8 +533,32 @@ impl Session<'_> {
                 None => tokens(rest)?,
             };
             let name = command_name(&mut args);
-            lock(self.state)?.commands.push(name.clone());
-            let reply = self.handle(&name, &args)?;
+            let fault = {
+                let mut state = lock(self.state)?;
+                state.commands.push(name.clone());
+                let index = state.commands.len().saturating_sub(1);
+                if let Some((at, folder, uid)) = state.delete_meanwhile.clone()
+                    && at == index
+                    && let Some(message) = state
+                        .folders
+                        .get_mut(&folder)
+                        .and_then(|f| f.messages.iter_mut().find(|m| m.uid == uid))
+                {
+                    message.flags.insert(r"\Deleted".to_owned());
+                }
+                state
+                    .fault
+                    .and_then(|(at, fault)| (at == index).then_some(fault))
+            };
+            let reply = match fault {
+                None => self.handle(&name, &args)?,
+                Some(Fault::No) => Reply::no("[UNAVAILABLE] scripted failure"),
+                Some(Fault::Stall) => {
+                    while read_line(stream)?.is_some() {}
+                    return Ok(());
+                }
+                Some(Fault::Close) => return close(stream),
+            };
             for line in &reply.untagged {
                 send(stream, line)?;
             }
@@ -661,8 +757,12 @@ impl Session<'_> {
             return Ok(Reply::bad("unsupported fetch item"));
         }
         let read_only = self.read_only;
+        let unsolicited = lock(self.state)?.unsolicited_fetch;
         let lines = self.with_folder(|folder| {
             let mut lines = Vec::new();
+            if unsolicited && !folder.messages.is_empty() {
+                lines.push(br"* 1 FETCH (FLAGS (\Seen))".to_vec());
+            }
             for (index, message) in folder.messages.iter_mut().enumerate() {
                 if !in_set(message.uid, set) {
                     continue;

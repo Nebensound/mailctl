@@ -1,6 +1,6 @@
 //! [`MailSender`] over SMTP: STARTTLS, or implicit TLS on port 465.
 
-use lettre::address::Envelope;
+use lettre::address::{Address, Envelope};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Certificate, CertificateStore, Tls, TlsParameters};
 use lettre::{SmtpTransport, Transport};
@@ -16,14 +16,10 @@ pub struct SmtpSender {
     transport: SmtpTransport,
 }
 
-// Coverage: only reached when a live SMTP server fails.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn send_err(e: impl std::fmt::Display) -> Error {
     Error::Send(e.to_string())
 }
 
-// Coverage: builds a lettre transport; the security mode is decided by `AccountConfig::smtp_tls`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 impl SmtpSender {
     /// Prepares the transport; the connection is opened on send.
     ///
@@ -48,28 +44,28 @@ impl SmtpSender {
                 .certificate_store(CertificateStore::None)
                 .add_root_certificate(Certificate::from_pem(pem).map_err(send_err)?);
         }
-        let parameters = parameters.build().map_err(send_err)?;
-        let tls = match account.smtp_tls() {
-            Security::Tls => Tls::Wrapper(parameters),
-            Security::StartTls => Tls::Required(parameters),
-        };
-        // `builder_dangerous` only means "no TLS unless set"; it is always
-        // set here, as `relay` and `starttls_relay` would.
-        let transport = SmtpTransport::builder_dangerous(&account.smtp_host)
-            .port(account.smtp_port)
-            .tls(tls)
-            .credentials(Credentials::new(
-                account.smtp_login().to_owned(),
-                secret.expose().to_owned(),
-            ))
-            .build();
-        Ok(Self { transport })
+        parameters
+            .build()
+            .map(|parameters| {
+                let tls = match account.smtp_tls() {
+                    Security::Tls => Tls::Wrapper(parameters),
+                    Security::StartTls => Tls::Required(parameters),
+                };
+                // `builder_dangerous` only means "no TLS unless set"; it is
+                // always set here, as `relay` and `starttls_relay` would.
+                let transport = SmtpTransport::builder_dangerous(&account.smtp_host)
+                    .port(account.smtp_port)
+                    .tls(tls)
+                    .credentials(Credentials::new(
+                        account.smtp_login().to_owned(),
+                        secret.expose().to_owned(),
+                    ))
+                    .build();
+                Self { transport }
+            })
+            .map_err(send_err)
     }
-}
 
-// Coverage: needs a live SMTP server.
-#[cfg_attr(coverage_nightly, coverage(off))]
-impl SmtpSender {
     /// Connects and logs in without sending anything.
     ///
     /// # Errors
@@ -83,8 +79,6 @@ impl SmtpSender {
     }
 }
 
-// Coverage: needs a live SMTP server.
-#[cfg_attr(coverage_nightly, coverage(off))]
 impl MailSender for SmtpSender {
     fn send(
         &mut self,
@@ -92,14 +86,15 @@ impl MailSender for SmtpSender {
         to: &EmailAddress,
         message: &[u8],
     ) -> Result<(), Error> {
-        let envelope = Envelope::new(
-            Some(from.as_str().parse().map_err(send_err)?),
-            vec![to.as_str().parse().map_err(send_err)?],
-        )
-        .map_err(send_err)?;
-        self.transport
-            .send_raw(&envelope, message)
-            .map(|_| ())
-            .map_err(send_err)
+        let address = |a: &EmailAddress| a.as_str().parse::<Address>().map_err(send_err);
+        address(from)
+            .and_then(|from| address(to).map(|to| (from, to)))
+            .and_then(|(from, to)| Envelope::new(Some(from), vec![to]).map_err(send_err))
+            .and_then(|envelope| {
+                self.transport
+                    .send_raw(&envelope, message)
+                    .map(|_| ())
+                    .map_err(send_err)
+            })
     }
 }

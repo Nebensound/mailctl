@@ -2,12 +2,19 @@
 //!
 //! The IMAP client is async; the adapter drives it on its own
 //! single-threaded tokio runtime, so the rest of mailctl stays synchronous.
+//!
+//! Commands whose answer `async-imap` streams (LIST, FETCH, STORE, SEARCH,
+//! EXPUNGE, CAPABILITY) go through [`command`] instead: those streams end at
+//! the tagged status without looking at it, so a refused command would pass
+//! as an empty success. Sending a command and reading its answer share one
+//! error path: a command fails alike whether the connection breaks while it
+//! is written or while its answer is read.
 
 use std::future::Future;
 use std::time::Duration;
 
-use async_imap::types::{Fetch, Name, NameAttribute};
-use futures_util::TryStreamExt as _;
+use async_imap::imap_proto::{RequestId, Response};
+use futures_util::{TryFutureExt as _, future};
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio_native_tls::TlsStream;
@@ -15,7 +22,10 @@ use tokio_native_tls::TlsStream;
 use crate::adapters::net::{Trust, connect_any};
 use crate::config::{AccountConfig, Secret};
 use crate::error::Error;
-use crate::imap_wire::{SelectReader, flag_list, flag_name, quoted_mailbox, special_use, uid_set};
+use crate::imap_wire::{
+    SelectKeywords, command_done, fetched, flag_list, has_capability, listed_folder,
+    quoted_mailbox, received, searched, uid_set,
+};
 use crate::store::{FolderInfo, MailStore, MoveSupport, RawHeader, RawMessage};
 use crate::types::{MailboxName, MessageId, Uid};
 use crate::utf7;
@@ -33,6 +43,8 @@ type Session = async_imap::Session<TlsStream<TcpStream>>;
 /// timeout.
 struct Driver {
     runtime: Runtime,
+    /// Time limit of each step.
+    timeout: Duration,
     /// A command timed out: its remaining response lines are still unread
     /// and would be taken as the answer to the next command.
     broken: bool,
@@ -46,16 +58,12 @@ pub struct ImapStore {
     keywords: bool,
 }
 
-// Coverage: only reached when a live IMAP server fails.
-#[cfg_attr(coverage_nightly, coverage(off))]
 fn store_err(e: impl std::fmt::Display) -> Error {
     Error::Store(e.to_string())
 }
 
-// Coverage: needs a live IMAP server.
-#[cfg_attr(coverage_nightly, coverage(off))]
 impl Driver {
-    /// Runs one IMAP step and gives up after [`IO_TIMEOUT`]. After a timeout
+    /// Runs one IMAP step and gives up after the timeout. After a timeout
     /// every later step fails without touching the connection.
     fn run<T>(&mut self, step: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
         if self.broken {
@@ -64,9 +72,10 @@ impl Driver {
             ));
         }
         // The timer must be created inside the runtime, hence the async block.
+        let timeout = self.timeout;
         let result = self
             .runtime
-            .block_on(async { tokio::time::timeout(IO_TIMEOUT, step).await });
+            .block_on(async { tokio::time::timeout(timeout, step).await });
         result.unwrap_or_else(|_| {
             self.broken = true;
             Err(store_err("the IMAP server did not answer in time"))
@@ -74,18 +83,67 @@ impl Driver {
     }
 }
 
-// Coverage: needs a live IMAP server; the decisions it uses are in `imap_wire`.
-#[cfg_attr(coverage_nightly, coverage(off))]
+/// A TLS connector that trusts the certificates `trust` names.
+fn tls_connector(trust: &Trust) -> Result<native_tls::TlsConnector, Error> {
+    let mut builder = native_tls::TlsConnector::builder();
+    if let Trust::Only(pem) = trust {
+        builder
+            .disable_built_in_roots(true)
+            .add_root_certificate(native_tls::Certificate::from_pem(pem).map_err(store_err)?);
+    }
+    builder.build().map_err(store_err)
+}
+
+/// Sends `text` and hands each response, the tagged completion included, to
+/// `each`; fails unless the server completes the command with OK.
+async fn command(
+    session: &mut Session,
+    text: &str,
+    each: impl FnMut(&Response<'_>),
+) -> Result<(), Error> {
+    let sent = session.run_command(text).await.map_err(store_err);
+    future::ready(sent)
+        .and_then(|tag| answer(session, tag, each))
+        .await
+}
+
+/// Reads the answer to the command tagged `tag`.
+async fn answer(
+    session: &mut Session,
+    tag: RequestId,
+    mut each: impl FnMut(&Response<'_>),
+) -> Result<(), Error> {
+    loop {
+        let response = received(session.read_response().await).map_err(store_err)?;
+        let parsed = response.parsed();
+        each(parsed);
+        if let Some(done) = command_done(parsed, &tag) {
+            return done.map_err(store_err);
+        }
+    }
+}
+
+/// UIDs of a `UID SEARCH`.
+async fn search(session: &mut Session, criteria: &str) -> Result<Vec<Uid>, Error> {
+    let mut found = Vec::new();
+    command(session, &format!("UID SEARCH {criteria}"), |r| {
+        found.extend(searched(r));
+    })
+    .await?;
+    found.into_iter().map(Uid::new).collect()
+}
+
 impl ImapStore {
     /// Connects and logs in.
     ///
     /// # Errors
     /// Connection, TLS or login errors.
     pub fn connect(account: &AccountConfig, secret: &Secret) -> Result<Self, Error> {
-        Self::connect_with(account, secret, &Trust::System)
+        Self::connect_with(account, secret, &Trust::System, IO_TIMEOUT)
     }
 
-    /// Connects and logs in, trusting the certificates `trust` names.
+    /// Connects and logs in, trusting the certificates `trust` names and
+    /// giving each step `timeout`.
     ///
     /// # Errors
     /// Connection, TLS or login errors.
@@ -93,39 +151,39 @@ impl ImapStore {
         account: &AccountConfig,
         secret: &Secret,
         trust: &Trust,
+        timeout: Duration,
     ) -> Result<Self, Error> {
-        let mut tls = native_tls::TlsConnector::builder();
-        if let Trust::Only(pem) = trust {
-            tls.disable_built_in_roots(true)
-                .add_root_certificate(native_tls::Certificate::from_pem(pem).map_err(store_err)?);
-        }
-        let tls = tokio_native_tls::TlsConnector::from(tls.build().map_err(store_err)?);
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let tls = tokio_native_tls::TlsConnector::from(tls_connector(trust)?);
+        // Always implicit TLS, whatever the port: IMAP's default would only
+        // use it on 993 and expect a plain greeting elsewhere.
+        let (runtime, tcp) = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
+            .and_then(|runtime| {
+                connect_any(&account.imap_host, account.imap_port, CONNECT_TIMEOUT)
+                    .and_then(|tcp| tcp.set_nonblocking(true).map(|()| tcp))
+                    .and_then(|tcp| {
+                        // Registering with the reactor needs the runtime.
+                        let _context = runtime.enter();
+                        TcpStream::from_std(tcp)
+                    })
+                    .map(|tcp| (runtime, tcp))
+            })
             .map_err(store_err)?;
-        // Always implicit TLS, whatever the port: IMAP's default would only
-        // use it on 993 and expect a plain greeting elsewhere.
-        let tcp = connect_any(&account.imap_host, account.imap_port, CONNECT_TIMEOUT)
-            .map_err(store_err)?;
-        tcp.set_nonblocking(true).map_err(store_err)?;
         let mut driver = Driver {
             runtime,
+            timeout,
             broken: false,
         };
         let session = driver.run(async {
-            let tcp = TcpStream::from_std(tcp).map_err(store_err)?;
             let stream = tls
                 .connect(&account.imap_host, tcp)
                 .await
                 .map_err(store_err)?;
             let mut client = async_imap::Client::new(stream);
-            client
-                .read_response()
-                .await
-                .map_err(store_err)?
-                .ok_or_else(|| store_err("connection closed before the greeting"))?;
+            received(client.read_response().await)
+                .map_err(|e| store_err(format!("before the greeting: {e}")))?;
             client
                 .login(&account.user, secret.expose())
                 .await
@@ -144,21 +202,11 @@ impl ImapStore {
         let Self {
             driver, session, ..
         } = self;
-        driver.run(async {
-            session
-                .uid_store(uid.to_string(), format!("{operation} {}", flag_list(flags)))
-                .await
-                .map_err(store_err)?
-                .try_collect::<Vec<Fetch>>()
-                .await
-                .map(|_| ())
-                .map_err(store_err)
-        })
+        let text = format!("UID STORE {uid} {operation} {}", flag_list(flags));
+        driver.run(command(session, &text, |_| ()))
     }
 }
 
-// Coverage: needs a live IMAP server.
-#[cfg_attr(coverage_nightly, coverage(off))]
 impl Drop for ImapStore {
     fn drop(&mut self) {
         let Self {
@@ -168,38 +216,16 @@ impl Drop for ImapStore {
     }
 }
 
-// Coverage: needs a live IMAP server; the decisions it uses are in `imap_wire`.
-#[cfg_attr(coverage_nightly, coverage(off))]
 impl MailStore for ImapStore {
     fn folders(&mut self) -> Result<Vec<FolderInfo>, Error> {
         let Self {
             driver, session, ..
         } = self;
-        let names: Vec<Name> = driver.run(async {
-            session
-                .list(Some(""), Some("*"))
-                .await
-                .map_err(store_err)?
-                .try_collect()
-                .await
-                .map_err(store_err)
-        })?;
-        // A name that is not valid modified UTF-7 (written by another client)
-        // is skipped instead of failing the whole listing.
-        Ok(names
-            .iter()
-            .filter_map(|n| {
-                let name = utf7::decode(n.name())
-                    .and_then(|decoded| MailboxName::new(&decoded))
-                    .ok()?;
-                Some(FolderInfo {
-                    name,
-                    delimiter: n.delimiter().map(str::to_owned),
-                    selectable: !n.attributes().contains(&NameAttribute::NoSelect),
-                    special_use: n.attributes().iter().find_map(special_use),
-                })
-            })
-            .collect())
+        let mut folders = Vec::new();
+        driver.run(command(session, "LIST \"\" *", |r| {
+            folders.extend(listed_folder(r));
+        }))?;
+        Ok(folders)
     }
 
     fn select(&mut self, folder: &MailboxName) -> Result<(), Error> {
@@ -210,23 +236,10 @@ impl MailStore for ImapStore {
         } = self;
         // Raw SELECT: the parsed mailbox cannot tell an absent PERMANENTFLAGS
         // code from an empty one, and that decides whether keywords stick.
-        *keywords = driver.run(async {
-            let tag = session
-                .run_command(format!("SELECT {}", quoted_mailbox(folder)))
-                .await
-                .map_err(store_err)?;
-            let mut reader = SelectReader::new(tag);
-            loop {
-                let response = session
-                    .read_response()
-                    .await
-                    .map_err(store_err)?
-                    .ok_or_else(|| store_err("connection closed during SELECT"))?;
-                if let Some(done) = reader.feed(response.parsed()) {
-                    return done.map_err(store_err);
-                }
-            }
-        })?;
+        let mut select = SelectKeywords::default();
+        let text = format!("SELECT {}", quoted_mailbox(folder));
+        driver.run(command(session, &text, |r| select.see(r)))?;
+        *keywords = select.allowed();
         Ok(())
     }
 
@@ -254,11 +267,7 @@ impl MailStore for ImapStore {
         let Self {
             driver, session, ..
         } = self;
-        driver
-            .run(async { session.uid_search("ALL").await.map_err(store_err) })?
-            .into_iter()
-            .map(Uid::new)
-            .collect()
+        driver.run(search(session, "ALL"))
     }
 
     fn headers(&mut self, uids: &[Uid]) -> Result<Vec<RawHeader>, Error> {
@@ -268,53 +277,48 @@ impl MailStore for ImapStore {
         let Self {
             driver, session, ..
         } = self;
-        let fetches: Vec<Fetch> = driver.run(async {
-            session
-                .uid_fetch(uid_set(uids), "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])")
-                .await
-                .map_err(store_err)?
-                .try_collect()
-                .await
-                .map_err(store_err)
-        })?;
-        fetches
-            .iter()
+        let mut fetches = Vec::new();
+        let text = format!(
+            "UID FETCH {} (UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])",
+            uid_set(uids)
+        );
+        driver.run(command(session, &text, |r| fetches.extend(fetched(r))))?;
+        // A FETCH without a UID is a flag change another client made, sent
+        // along unasked; it is not one of the requested mails.
+        Ok(fetches
+            .into_iter()
             .filter_map(|f| {
-                let uid = Uid::new(f.uid?).ok()?;
-                Some(Ok(RawHeader {
+                let uid = f.uid.and_then(|uid| Uid::new(uid).ok())?;
+                Some(RawHeader {
                     uid,
-                    flags: f.flags().map(|flag| flag_name(&flag)).collect(),
+                    flags: f.flags,
                     size: f.size.unwrap_or(0),
-                    header: f.header().unwrap_or_default().to_vec(),
-                }))
+                    header: f.header.unwrap_or_default(),
+                })
             })
-            .collect()
+            .collect())
     }
 
     fn message(&mut self, uid: Uid) -> Result<Option<RawMessage>, Error> {
         let Self {
             driver, session, ..
         } = self;
-        let fetches: Vec<Fetch> = driver.run(async {
-            session
-                .uid_fetch(uid.to_string(), "(UID FLAGS RFC822.SIZE BODY.PEEK[])")
-                .await
-                .map_err(store_err)?
-                .try_collect()
-                .await
-                .map_err(store_err)
-        })?;
-        Ok(fetches.iter().find(|f| f.uid == Some(uid.get())).map(|f| {
-            let body = f.body().unwrap_or_default().to_vec();
-            RawMessage {
-                uid,
-                flags: f.flags().map(|flag| flag_name(&flag)).collect(),
-                size: f
-                    .size
-                    .unwrap_or_else(|| u32::try_from(body.len()).unwrap_or(u32::MAX)),
-                body,
-            }
-        }))
+        let mut fetches = Vec::new();
+        let text = format!("UID FETCH {uid} (UID FLAGS RFC822.SIZE BODY.PEEK[])");
+        driver.run(command(session, &text, |r| fetches.extend(fetched(r))))?;
+        Ok(fetches
+            .into_iter()
+            .find(|f| f.uid == Some(uid.get()))
+            .map(|f| {
+                let body = f.body.unwrap_or_default();
+                let length = u32::try_from(body.len()).unwrap_or(u32::MAX);
+                RawMessage {
+                    uid,
+                    flags: f.flags,
+                    size: f.size.unwrap_or(length),
+                    body,
+                }
+            }))
     }
 
     fn add_flags(&mut self, uid: Uid, flags: &[&str]) -> Result<(), Error> {
@@ -329,10 +333,14 @@ impl MailStore for ImapStore {
         let Self {
             driver, session, ..
         } = self;
-        let caps = driver.run(async { session.capabilities().await.map_err(store_err) })?;
-        Ok(if caps.has_str("MOVE") {
+        let (mut moves, mut uidplus) = (false, false);
+        driver.run(command(session, "CAPABILITY", |r| {
+            moves |= has_capability(r, "MOVE");
+            uidplus |= has_capability(r, "UIDPLUS");
+        }))?;
+        Ok(if moves {
             MoveSupport::Move
-        } else if caps.has_str("UIDPLUS") {
+        } else if uidplus {
             MoveSupport::CopyUidExpunge
         } else {
             MoveSupport::CopyExpunge
@@ -355,43 +363,21 @@ impl MailStore for ImapStore {
         let Self {
             driver, session, ..
         } = self;
-        driver
-            .run(async { session.uid_search("DELETED").await.map_err(store_err) })?
-            .into_iter()
-            .map(Uid::new)
-            .collect()
+        driver.run(search(session, "DELETED"))
     }
 
     fn expunge_uid(&mut self, uid: Uid) -> Result<(), Error> {
         let Self {
             driver, session, ..
         } = self;
-        driver.run(async {
-            session
-                .uid_expunge(uid.to_string())
-                .await
-                .map_err(store_err)?
-                .try_collect::<Vec<_>>()
-                .await
-                .map(|_| ())
-                .map_err(store_err)
-        })
+        driver.run(command(session, &format!("UID EXPUNGE {uid}"), |_| ()))
     }
 
     fn expunge_all_deleted(&mut self) -> Result<(), Error> {
         let Self {
             driver, session, ..
         } = self;
-        driver.run(async {
-            session
-                .expunge()
-                .await
-                .map_err(store_err)?
-                .try_collect::<Vec<_>>()
-                .await
-                .map(|_| ())
-                .map_err(store_err)
-        })
+        driver.run(command(session, "EXPUNGE", |_| ()))
     }
 
     fn move_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
@@ -411,16 +397,7 @@ impl MailStore for ImapStore {
         let Self {
             driver, session, ..
         } = self;
-        driver
-            .run(async {
-                session
-                    .uid_search(format!("HEADER Message-ID \"{quoted}\""))
-                    .await
-                    .map_err(store_err)
-            })?
-            .into_iter()
-            .map(Uid::new)
-            .collect()
+        driver.run(search(session, &format!("HEADER Message-ID \"{quoted}\"")))
     }
 
     fn create_folder(&mut self, name: &MailboxName) -> Result<(), Error> {

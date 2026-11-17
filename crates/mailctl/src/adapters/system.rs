@@ -62,8 +62,6 @@ impl Backend for SystemBackend {
         self
     }
 
-    // Coverage: opens a live IMAP connection.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn connect(
         &self,
         account: &AccountConfig,
@@ -72,14 +70,12 @@ impl Backend for SystemBackend {
         Ok(Box::new(ImapStore::connect(account, secret)?))
     }
 
-    // Coverage: opens a live SMTP connection.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn sender(
         &self,
         account: &AccountConfig,
         secret: &Secret,
     ) -> Result<Box<dyn MailSender>, Error> {
-        Ok(Box::new(SmtpSender::new(account, secret)?))
+        SmtpSender::new(account, secret).map(|sender| Box::new(sender) as Box<dyn MailSender>)
     }
 
     fn unix_time(&self) -> u64 {
@@ -254,10 +250,8 @@ impl Backend for SystemBackend {
         Box::new(SystemNet::default())
     }
 
-    // Coverage: needs a live SMTP server.
-    #[cfg_attr(coverage_nightly, coverage(off))]
     fn check_smtp(&self, account: &AccountConfig, secret: &Secret) -> Result<(), Error> {
-        SmtpSender::new(account, secret)?.check()
+        SmtpSender::new(account, secret).and_then(|sender| sender.check())
     }
 }
 
