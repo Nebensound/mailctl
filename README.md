@@ -274,6 +274,14 @@ against the `MailStore` and `MailSender` traits; tests run them against an
 in-memory mailbox (`testing.rs`). The adapters in `src/adapters/` only
 translate to IMAP, SMTP, files, environment and keychain.
 
+End-to-end tests (`src/tests/e2e.rs`) run the command line through the real
+IMAP adapter and TLS against a scripted server on a local port
+(`src/tests/server/`), with a certificate authority made for each test run.
+The server plays Dovecot, iCloud Mail and a server with nothing beyond RFC
+3501; each profile repeats what the real server answered to the same
+commands (capabilities, `LIST` attributes, `PERMANENTFLAGS`, iCloud's header
+search that never matches).
+
 ## Coverage
 
 This project requires 100% test coverage of its production code (regions,
