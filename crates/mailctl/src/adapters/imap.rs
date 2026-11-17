@@ -29,10 +29,18 @@ const IO_TIMEOUT: Duration = Duration::from_mins(2);
 /// An IMAP session over implicit TLS.
 type Session = async_imap::Session<TlsStream<TcpStream>>;
 
+/// Drives the async IMAP client and stops using the connection after a
+/// timeout.
+struct Driver {
+    runtime: Runtime,
+    /// A command timed out: its remaining response lines are still unread
+    /// and would be taken as the answer to the next command.
+    broken: bool,
+}
+
 /// An authenticated IMAP session.
 pub struct ImapStore {
-    /// Drives the async IMAP client.
-    runtime: Runtime,
+    driver: Driver,
     session: Session,
     /// Whether the selected folder keeps custom keywords (`PERMANENTFLAGS`).
     keywords: bool,
@@ -44,17 +52,26 @@ fn store_err(e: impl std::fmt::Display) -> Error {
     Error::Store(e.to_string())
 }
 
-/// Runs one IMAP step on `runtime` and gives up after [`IO_TIMEOUT`].
 // Coverage: needs a live IMAP server.
 #[cfg_attr(coverage_nightly, coverage(off))]
-fn block_on<T>(
-    runtime: &Runtime,
-    step: impl Future<Output = Result<T, Error>>,
-) -> Result<T, Error> {
-    // The timer must be created inside the runtime, hence the async block.
-    runtime
-        .block_on(async { tokio::time::timeout(IO_TIMEOUT, step).await })
-        .map_err(|_| store_err("the IMAP server did not answer in time"))?
+impl Driver {
+    /// Runs one IMAP step and gives up after [`IO_TIMEOUT`]. After a timeout
+    /// every later step fails without touching the connection.
+    fn run<T>(&mut self, step: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
+        if self.broken {
+            return Err(store_err(
+                "the IMAP connection timed out earlier and is not used again",
+            ));
+        }
+        // The timer must be created inside the runtime, hence the async block.
+        let result = self
+            .runtime
+            .block_on(async { tokio::time::timeout(IO_TIMEOUT, step).await });
+        result.unwrap_or_else(|_| {
+            self.broken = true;
+            Err(store_err("the IMAP server did not answer in time"))
+        })
+    }
 }
 
 // Coverage: needs a live IMAP server; the decisions it uses are in `imap_wire`.
@@ -78,7 +95,11 @@ impl ImapStore {
         let tls = tokio_native_tls::TlsConnector::from(
             native_tls::TlsConnector::new().map_err(store_err)?,
         );
-        let session = block_on(&runtime, async {
+        let mut driver = Driver {
+            runtime,
+            broken: false,
+        };
+        let session = driver.run(async {
             let tcp = TcpStream::from_std(tcp).map_err(store_err)?;
             let stream = tls
                 .connect(&account.imap_host, tcp)
@@ -96,7 +117,7 @@ impl ImapStore {
                 .map_err(|(e, _)| store_err(e))
         })?;
         Ok(Self {
-            runtime,
+            driver,
             session,
             keywords: false,
         })
@@ -106,9 +127,9 @@ impl ImapStore {
     /// `+FLAGS.SILENT` or `-FLAGS.SILENT`.
     fn store_flags(&mut self, uid: Uid, operation: &str, flags: &[&str]) -> Result<(), Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        block_on(runtime, async {
+        driver.run(async {
             session
                 .uid_store(uid.to_string(), format!("{operation} {}", flag_list(flags)))
                 .await
@@ -126,9 +147,9 @@ impl ImapStore {
 impl Drop for ImapStore {
     fn drop(&mut self) {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        let _ = block_on(runtime, async { session.logout().await.map_err(store_err) });
+        let _ = driver.run(async { session.logout().await.map_err(store_err) });
     }
 }
 
@@ -137,9 +158,9 @@ impl Drop for ImapStore {
 impl MailStore for ImapStore {
     fn folders(&mut self) -> Result<Vec<FolderInfo>, Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        let names: Vec<Name> = block_on(runtime, async {
+        let names: Vec<Name> = driver.run(async {
             session
                 .list(Some(""), Some("*"))
                 .await
@@ -168,13 +189,13 @@ impl MailStore for ImapStore {
 
     fn select(&mut self, folder: &MailboxName) -> Result<(), Error> {
         let Self {
-            runtime,
+            driver,
             session,
             keywords,
         } = self;
         // Raw SELECT: the parsed mailbox cannot tell an absent PERMANENTFLAGS
         // code from an empty one, and that decides whether keywords stick.
-        *keywords = block_on(runtime, async {
+        *keywords = driver.run(async {
             let tag = session
                 .run_command(format!("SELECT {}", quoted_mailbox(folder)))
                 .await
@@ -196,12 +217,12 @@ impl MailStore for ImapStore {
 
     fn select_read_only(&mut self, folder: &MailboxName) -> Result<(), Error> {
         let Self {
-            runtime,
+            driver,
             session,
             keywords,
         } = self;
         *keywords = false;
-        block_on(runtime, async {
+        driver.run(async {
             session
                 .examine(utf7::encode(folder.as_str()))
                 .await
@@ -216,14 +237,13 @@ impl MailStore for ImapStore {
 
     fn uids(&mut self) -> Result<Vec<Uid>, Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        block_on(runtime, async {
-            session.uid_search("ALL").await.map_err(store_err)
-        })?
-        .into_iter()
-        .map(Uid::new)
-        .collect()
+        driver
+            .run(async { session.uid_search("ALL").await.map_err(store_err) })?
+            .into_iter()
+            .map(Uid::new)
+            .collect()
     }
 
     fn headers(&mut self, uids: &[Uid]) -> Result<Vec<RawHeader>, Error> {
@@ -231,9 +251,9 @@ impl MailStore for ImapStore {
             return Ok(Vec::new());
         }
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        let fetches: Vec<Fetch> = block_on(runtime, async {
+        let fetches: Vec<Fetch> = driver.run(async {
             session
                 .uid_fetch(uid_set(uids), "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])")
                 .await
@@ -258,9 +278,9 @@ impl MailStore for ImapStore {
 
     fn message(&mut self, uid: Uid) -> Result<Option<RawMessage>, Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        let fetches: Vec<Fetch> = block_on(runtime, async {
+        let fetches: Vec<Fetch> = driver.run(async {
             session
                 .uid_fetch(uid.to_string(), "(UID FLAGS RFC822.SIZE BODY.PEEK[])")
                 .await
@@ -292,11 +312,9 @@ impl MailStore for ImapStore {
 
     fn move_support(&mut self) -> Result<MoveSupport, Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        let caps = block_on(runtime, async {
-            session.capabilities().await.map_err(store_err)
-        })?;
+        let caps = driver.run(async { session.capabilities().await.map_err(store_err) })?;
         Ok(if caps.has_str("MOVE") {
             MoveSupport::Move
         } else if caps.has_str("UIDPLUS") {
@@ -308,9 +326,9 @@ impl MailStore for ImapStore {
 
     fn copy_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        block_on(runtime, async {
+        driver.run(async {
             session
                 .uid_copy(uid.to_string(), utf7::encode(target.as_str()))
                 .await
@@ -320,21 +338,20 @@ impl MailStore for ImapStore {
 
     fn deleted_uids(&mut self) -> Result<Vec<Uid>, Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        block_on(runtime, async {
-            session.uid_search("DELETED").await.map_err(store_err)
-        })?
-        .into_iter()
-        .map(Uid::new)
-        .collect()
+        driver
+            .run(async { session.uid_search("DELETED").await.map_err(store_err) })?
+            .into_iter()
+            .map(Uid::new)
+            .collect()
     }
 
     fn expunge_uid(&mut self, uid: Uid) -> Result<(), Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        block_on(runtime, async {
+        driver.run(async {
             session
                 .uid_expunge(uid.to_string())
                 .await
@@ -348,9 +365,9 @@ impl MailStore for ImapStore {
 
     fn expunge_all_deleted(&mut self) -> Result<(), Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        block_on(runtime, async {
+        driver.run(async {
             session
                 .expunge()
                 .await
@@ -364,9 +381,9 @@ impl MailStore for ImapStore {
 
     fn move_to(&mut self, uid: Uid, target: &MailboxName) -> Result<(), Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        block_on(runtime, async {
+        driver.run(async {
             session
                 .uid_mv(uid.to_string(), utf7::encode(target.as_str()))
                 .await
@@ -377,24 +394,25 @@ impl MailStore for ImapStore {
     fn find_message_id(&mut self, id: &MessageId) -> Result<Vec<Uid>, Error> {
         let quoted = id.as_str().replace('\\', "\\\\").replace('"', "\\\"");
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        block_on(runtime, async {
-            session
-                .uid_search(format!("HEADER Message-ID \"{quoted}\""))
-                .await
-                .map_err(store_err)
-        })?
-        .into_iter()
-        .map(Uid::new)
-        .collect()
+        driver
+            .run(async {
+                session
+                    .uid_search(format!("HEADER Message-ID \"{quoted}\""))
+                    .await
+                    .map_err(store_err)
+            })?
+            .into_iter()
+            .map(Uid::new)
+            .collect()
     }
 
     fn create_folder(&mut self, name: &MailboxName) -> Result<(), Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
-        block_on(runtime, async {
+        driver.run(async {
             session
                 .create(utf7::encode(name.as_str()))
                 .await
@@ -409,11 +427,11 @@ impl MailStore for ImapStore {
         flags: &[&str],
     ) -> Result<(), Error> {
         let Self {
-            runtime, session, ..
+            driver, session, ..
         } = self;
         // The IMAP client quotes and escapes the mailbox name itself.
         let flags = (!flags.is_empty()).then(|| flag_list(flags));
-        block_on(runtime, async {
+        driver.run(async {
             session
                 .append(
                     utf7::encode(folder.as_str()),
