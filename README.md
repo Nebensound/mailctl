@@ -296,9 +296,10 @@ nobody sets versions or pushes tags by hand.
   [semantic-version](https://github.com/PaulHatch/semantic-version), tags
   `vX.Y.Z`: `feat:` releases a minor version, `!` after the type (`feat!:`,
   `refactor(store)!:`) or a `BREAKING CHANGE:` footer a major version,
-  everything else (`fix:`, `deps:`, `refactor:`, ...) a patch version.
-  `ci:`, `docs:`, `test:`, `chore:` and `style:` release nothing on their own;
-  they go out with the next release. While the
+  `fix:`, `perf:`, `deps:` (dependency updates change the shipped binary) and
+  any other type a patch version. `build:`, `ci:`, `docs:`, `test:`,
+  `chore:`, `style:` and `refactor:` release nothing on their own, as usual
+  for Conventional Commits; they go out with the next release. While the
   major version is 0, everything moves one place, as Cargo treats `0.x`:
   `!` releases a minor version (`0.1.0` → `0.2.0`), `feat:` and `fix:` a patch
   version (`0.1.0` → `0.1.1`). The pull

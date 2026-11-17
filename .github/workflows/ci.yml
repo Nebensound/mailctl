@@ -93,7 +93,7 @@ jobs:
           enable_prerelease_mode: true
           # Changes that do not touch the shipped program are released with
           # the next change that does; so is this job's own version commit.
-          ignore_commits_pattern: '/^((ci|docs|test|chore|style)(\(.+\))?:|Set crate version to )/'
+          ignore_commits_pattern: '/^((build|ci|docs|test|chore|style|refactor)(\(.+\))?:|Set crate version to )/'
           version_format: "${major}.${minor}.${patch}"
       - name: Resolve effective version
         id: effective
