@@ -4,11 +4,14 @@ all-features = true
 
 [advisories]
 version = 2
+# Temporary exceptions, tracked in #12. Both are "unmaintained" notices, not
+# vulnerabilities, and both crates come in only through async-imap; mailctl
+# uses neither itself. Remove an entry as soon as a released async-imap no
+# longer depends on that crate (check with `cargo tree -i <crate>`), so that
+# `cargo deny check` passes without it again.
 ignore = [
-    # chrono comes only through imap 3.0.0-alpha.15 (no release without it);
-    # mailctl does not use it. Unmaintained, no known vulnerability. Remove
-    # once imap drops chrono.
-    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; only a transitive dependency of imap" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono: async-imap parses INTERNALDATE with it; remove when async-imap drops chrono (#12)" },
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils: removed in async-imap main (async-email/async-imap#155), remove with its next release (#12)" },
 ]
 
 [licenses]
