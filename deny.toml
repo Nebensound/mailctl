@@ -4,6 +4,12 @@ all-features = true
 
 [advisories]
 version = 2
+ignore = [
+    # chrono comes only through imap 3.0.0-alpha.15 (no release without it);
+    # mailctl does not use it. Unmaintained, no known vulnerability. Remove
+    # once imap drops chrono.
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; only a transitive dependency of imap" },
+]
 
 [licenses]
 version = 2
