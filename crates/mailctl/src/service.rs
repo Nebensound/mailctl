@@ -460,15 +460,17 @@ pub fn create_folder(
 
 /// After sending: flags the original as `$Forwarded` and stores the copy in
 /// the sent folder, and confirms both. The copy does not depend on the flag:
-/// both steps run, and every failure is reported.
+/// both steps run, and every failure is reported. `sent_before` is the sent
+/// folder's highest UID before sending.
 fn record_forward(
     store: &mut dyn MailStore,
     job: &ForwardJob<'_>,
     bytes: &[u8],
+    sent_before: Option<Uid>,
 ) -> Result<(), Error> {
     let flagged = flag_forwarded(store, job);
     let copied = match job.sent_folder {
-        Some(sent) => copy_unless_filed(store, sent, job.new_message_id, bytes),
+        Some(sent) => copy_unless_filed(store, sent, job.new_message_id, bytes, sent_before),
         None => Ok(()),
     };
     match (flagged, copied) {
@@ -479,18 +481,28 @@ fn record_forward(
 }
 
 /// Stores the copy in the sent folder, unless the SMTP server has filed one
-/// there itself (as Gmail and Microsoft 365 do), and confirms it.
+/// there itself (as Gmail and Microsoft 365 do), and confirms it. A copy is
+/// a mail with this `Message-ID` above `before`, the folder's highest UID
+/// before sending, read from its headers; the header search alone would miss
+/// it on servers that never match one (iCloud). A filed copy is also found
+/// by that search.
 fn copy_unless_filed(
     store: &mut dyn MailStore,
     sent: &MailboxName,
     id: &MessageId,
     bytes: &[u8],
+    before: Option<Uid>,
 ) -> Result<(), Error> {
-    if newest_with_id(store, sent, id)?.is_some() {
+    if newest_with_id_above(store, sent, id, before)?.is_some()
+        || newest_with_id(store, sent, id)?.is_some()
+    {
         return Ok(());
     }
     store.append(sent, bytes, &[FLAG_SEEN])?;
-    confirm_in_folder(store, sent, id, None)
+    if newest_with_id_above(store, sent, id, before)?.is_none() {
+        return Err(Error::NotConfirmed(format!("{id} not found in {sent}")));
+    }
+    Ok(())
 }
 
 fn flag_forwarded(store: &mut dyn MailStore, job: &ForwardJob<'_>) -> Result<(), Error> {
@@ -571,11 +583,23 @@ pub fn forward(
     }
     let mut confirmed = false;
     if !job.dry_run {
+        // The sent folder's highest UID before sending: a copy above it is
+        // new and is found without the server's header search, which some
+        // servers (iCloud) never match. Reading it selects the sent folder,
+        // so the original's folder is selected again for the flag.
+        let sent_before = match job.sent_folder {
+            Some(sent) => {
+                let newest = newest_uid(store, sent)?;
+                store.select(job.folder)?;
+                newest
+            }
+            None => None,
+        };
         sender.send(job.from, job.to, &bytes)?;
         // The mail is out. Flag the original first, so a retry is refused as
         // `AlreadyForwarded` even if storing the copy fails; report anything
         // that fails from here on as partly done instead of as a plain error.
-        record_forward(store, job, &bytes).map_err(|e| {
+        record_forward(store, job, &bytes, sent_before).map_err(|e| {
             Error::Partial(format!(
                 "UID {} was forwarded to {}, but {e}",
                 job.uid, job.to

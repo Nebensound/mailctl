@@ -505,6 +505,9 @@ impl MailStore for Shared {
 pub(crate) struct FakeSender {
     pub(crate) sent: Vec<(EmailAddress, Vec<u8>)>,
     pub(crate) fail: bool,
+    /// The SMTP server files each submission into this folder of this
+    /// store itself, as Gmail and Microsoft 365 do.
+    pub(crate) files_into: Option<(Rc<RefCell<FakeStore>>, MailboxName)>,
 }
 
 impl MailSender for FakeSender {
@@ -518,6 +521,9 @@ impl MailSender for FakeSender {
             return Err(Error::Send("simulated failure".into()));
         }
         self.sent.push((to.clone(), message.to_vec()));
+        if let Some((store, folder)) = &self.files_into {
+            store.borrow_mut().append(folder, message, &[])?;
+        }
         Ok(())
     }
 }

@@ -1,7 +1,10 @@
 //! Tests for `service`.
 
 use super::*;
-use crate::testing::{FakeSender, FakeStore, folder, mail, uid};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use crate::testing::{FakeSender, FakeStore, Shared, folder, mail, uid};
 use crate::types::MailRef;
 
 fn expect(id: &str) -> Result<Expect, Error> {
@@ -435,10 +438,11 @@ fn every_server_failure_aborts_the_operation() -> Result<(), Error> {
     // select, headers, flag, headers; move: folders, capability, select,
     // headers, (flag,) move, headers of the UID, and with a Message-ID
     // select, search, headers; create: folders, create, folders; forward: select,
-    // headers, keywords, message, folders, flag, headers, then in Sent select,
-    // search, headers (no copy filed by the server), append, select, search,
-    // headers.
-    assert_eq!(calls, [3, 3, 4, 10, 6, 3, 14]);
+    // headers, keywords, message, folders, the newest UID in Sent (select,
+    // uids) and select again, flag, headers, then in Sent the newer mails
+    // (select, uids, headers) and the search (select, search, headers) for a
+    // copy filed by the server, append, and the newer mails again.
+    assert_eq!(calls, [3, 3, 4, 10, 6, 3, 20]);
     Ok(())
 }
 
@@ -499,10 +503,12 @@ fn failed_sent_copy_does_not_allow_a_second_forward() -> Result<(), Error> {
         note: None,
         dry_run: false,
     };
-    // Calls: select, headers, keywords, message, folders, flag, headers,
-    // select, search, headers, append (fails).
+    // Calls: select, headers, keywords, message, folders, then the sent
+    // folder's newest UID (select, uids) and select again; after sending:
+    // flag, headers, then the copy check (select, uids, headers, select,
+    // search, headers) and append (fails).
     let mut store = FakeStore {
-        fail_at_call: Some(10),
+        fail_at_call: Some(16),
         ..FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])])
     };
     let mut sender = FakeSender::default();
@@ -761,6 +767,66 @@ fn a_copy_the_server_filed_itself_is_not_stored_again() -> Result<(), Error> {
     let report = forward(&mut store, &mut FakeSender::default(), &config, &job)?;
     assert!(report.confirmed);
     assert_eq!(store.uids_of("Sent").len(), 1);
+    Ok(())
+}
+
+#[test]
+fn forward_confirms_the_sent_copy_where_the_header_search_finds_nothing() -> Result<(), Error> {
+    // iCloud: `SEARCH HEADER Message-ID` never matches.
+    let config = crate::testing::config()?;
+    let (inbox, sent, from, to, new_id, by_id) = forward_job_parts()?;
+    let job = ForwardJob {
+        folder: &inbox,
+        uid: uid(2)?,
+        expect: &by_id,
+        to: &to,
+        from: &from,
+        sent_folder: Some(&sent),
+        new_message_id: &new_id,
+        note: None,
+        dry_run: false,
+    };
+    let mut store = FakeStore {
+        no_header_search: true,
+        ..FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])])
+    };
+    // An older mail in Sent: the copy must be found above it.
+    store.append(&sent, b"Message-ID: <old@x>\r\nSubject: old\r\n\r\nx", &[])?;
+    let report = forward(&mut store, &mut FakeSender::default(), &config, &job)?;
+    assert!(report.confirmed);
+    assert_eq!(store.uids_of("Sent").len(), 2);
+    assert_eq!(store.flags("INBOX", 2), vec![FLAG_FORWARDED.to_owned()]);
+    Ok(())
+}
+
+#[test]
+fn a_filed_copy_is_found_without_the_header_search() -> Result<(), Error> {
+    // The SMTP server files the submission itself, and the IMAP server's
+    // header search never matches: the copy is still found by its new UID.
+    let config = crate::testing::config()?;
+    let (inbox, sent, from, to, new_id, by_id) = forward_job_parts()?;
+    let job = ForwardJob {
+        folder: &inbox,
+        uid: uid(2)?,
+        expect: &by_id,
+        to: &to,
+        from: &from,
+        sent_folder: Some(&sent),
+        new_message_id: &new_id,
+        note: None,
+        dry_run: false,
+    };
+    let shared = Rc::new(RefCell::new(FakeStore {
+        no_header_search: true,
+        ..FakeStore::with_inbox(vec![mail(2, "a@x", "Invoice", &[])])
+    }));
+    let mut sender = FakeSender {
+        files_into: Some((Rc::clone(&shared), sent.clone())),
+        ..FakeSender::default()
+    };
+    let report = forward(&mut Shared(Rc::clone(&shared)), &mut sender, &config, &job)?;
+    assert!(report.confirmed);
+    assert_eq!(shared.borrow().uids_of("Sent").len(), 1, "no second copy");
     Ok(())
 }
 
