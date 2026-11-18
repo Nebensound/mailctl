@@ -552,9 +552,10 @@ fn forward_over_starttls_sends_files_and_flags() -> Result<(), String> {
     let [copy] = copies.as_slice() else {
         return Err(format!("{} copies filed", copies.len()));
     };
-    // lettre ends DATA with an empty line of its own after the message.
-    assert!(
-        sent.data.starts_with(&copy.body),
+    // lettre ends DATA with a CRLF of its own after the message.
+    assert_eq!(
+        sent.data.strip_suffix(b"\r\n"),
+        Some(copy.body.as_slice()),
         "the copy is what was sent"
     );
     assert_eq!(e2e.flags("INBOX", "a@example.com")?, ["$Forwarded"]);
