@@ -409,6 +409,17 @@ fn literal_size(line: &str) -> Option<(&str, usize)> {
     Some((line.get(..open)?, size.parse().ok()?))
 }
 
+/// The FETCH items this server answers.
+const FETCH_ITEMS: [&str; 7] = [
+    "UID",
+    "FLAGS",
+    "RFC822.SIZE",
+    "BODY.PEEK[HEADER]",
+    "BODY[HEADER]",
+    "BODY.PEEK[]",
+    "BODY[]",
+];
+
 impl Session<'_> {
     fn run(&mut self, stream: &mut Stream) -> Result<(), String> {
         send(stream, b"* OK [CAPABILITY IMAP4rev1] scripted server ready")?;
@@ -472,6 +483,10 @@ impl Session<'_> {
             "UID FETCH" => self.fetch(text(0), args.get(1))?,
             "UID STORE" => self.store(text(0), text(1), args.get(2))?,
             "UID COPY" => self.copy(text(0), text(1), false)?,
+            // MOVE expunges from the source, which a read-only mailbox refuses.
+            "UID MOVE" if self.profile.has("MOVE") && self.read_only => {
+                Reply::no("Mailbox is read-only")
+            }
             "UID MOVE" if self.profile.has("MOVE") => self.copy(text(0), text(1), true)?,
             "UID EXPUNGE" if self.profile.has("UIDPLUS") => self.expunge(Some(text(0)))?,
             _ => Reply::bad("unknown command"),
@@ -574,6 +589,11 @@ impl Session<'_> {
             .and_then(Token::text)
             .unwrap_or_default()
             .to_lowercase();
+        // A real server answers BAD to criteria it cannot parse; an empty
+        // result here would hide a search this server does not know.
+        if !matches!(key.as_str(), "ALL" | "DELETED" | "HEADER") {
+            return Ok(Reply::bad("unsupported search key"));
+        }
         let profile = self.profile;
         let found = self.with_folder(|folder| {
             folder
@@ -612,6 +632,10 @@ impl Session<'_> {
             Some(item) => item.text().map(str::to_uppercase).into_iter().collect(),
             None => Vec::new(),
         };
+        // As with SEARCH: BAD instead of silently leaving an item out.
+        if !items.iter().all(|i| FETCH_ITEMS.contains(&i.as_str())) {
+            return Ok(Reply::bad("unsupported fetch item"));
+        }
         let read_only = self.read_only;
         let lines = self.with_folder(|folder| {
             let mut lines = Vec::new();
@@ -641,6 +665,7 @@ impl Session<'_> {
                             line.extend(format!(" BODY[] {{{}}}\r\n", message.body.len()).bytes());
                             line.extend_from_slice(&message.body);
                         }
+                        // `UID` is already in the line; the rest are refused above.
                         _ => {}
                     }
                 }
