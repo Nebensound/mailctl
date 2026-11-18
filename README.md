@@ -13,17 +13,21 @@ deletion (checked right before `EXPUNGE`; see below).
 
 ## Installation
 
-Binaries for macOS (Apple Silicon and Intel) and Linux (x86_64) are attached
-to each [GitHub release](https://github.com/Nebensound/mailctl/releases);
-unpack one and put `mailctl` on your `PATH`. The Linux binary is statically
-linked (musl, OpenSSL compiled in), so it needs no particular glibc or
-OpenSSL; TLS needs the system CA certificates (`ca-certificates` package, or
-`SSL_CERT_FILE`), which slim images such as `debian:*-slim` and `alpine` do
-not include by default. With Rust installed:
+With [Rust](https://rustup.rs) installed:
 
 ```sh
 cargo install mailctl --locked
 ```
+
+On Linux the build links the system OpenSSL and needs its headers and
+`pkg-config` (`libssl-dev pkg-config` on Debian and Ubuntu). Without them,
+compile OpenSSL in instead:
+
+```sh
+cargo install mailctl --locked --features vendored-openssl
+```
+
+There are no prebuilt binaries before 1.0.
 
 ## Safety model
 
@@ -311,29 +315,27 @@ nobody sets versions or pushes tags by hand.
   Commits](https://www.conventionalcommits.org/) with
   [semantic-version](https://github.com/PaulHatch/semantic-version), tags
   `vX.Y.Z`: `feat:` releases a minor version, `!` after the type (`feat!:`,
-  `refactor(store)!:`) or a `BREAKING CHANGE:` footer a major version,
-  `fix:`, `perf:`, `deps:` (dependency updates change the shipped binary) and
-  any other type a patch version. `build:`, `ci:`, `docs:`, `test:`,
-  `chore:`, `style:` and `refactor:` release nothing on their own, as usual
-  for Conventional Commits; they go out with the next release. While the
-  major version is 0, everything moves one place, as Cargo treats `0.x`:
-  `!` releases a minor version (`0.1.0` → `0.2.0`), `feat:` and `fix:` a patch
-  version (`0.1.0` → `0.1.1`). The pull
-  request title becomes the squash commit on `main`, so it must carry the
-  type; on the pull request the version is derived from the branch commits,
-  so at least one of them carries it too.
+  `refactor(store)!:`) or a `BREAKING CHANGE:` footer a major version, `fix:`,
+  `perf:`, `deps:` (dependency updates change what `cargo install --locked`
+  builds) and any other type a patch version. `build:`, `ci:`, `docs:`,
+  `test:`, `chore:`, `style:` and `refactor:` release nothing on their own, as
+  usual for Conventional Commits; they go out with the next release. While the
+  major version is 0, everything moves one place, as Cargo treats `0.x`: `!`
+  releases a minor version (`0.1.0` → `0.2.0`), `feat:` and `fix:` a patch
+  version (`0.1.0` → `0.1.1`). The pull request title becomes the squash
+  commit on `main`, so it must carry the type; on the pull request the version
+  is derived from the branch commits, so at least one of them carries it too.
 - On a pull request, CI commits the derived version to `Cargo.toml` and
   `Cargo.lock` on the branch and starts the checks again for that commit. A
   version raised by hand is kept if it is higher; a version this job set
   earlier is derived again and can go down. On `main`, CI only verifies
   that the tree carries the derived version.
-- After all checks pass on `main`, CI builds the binaries, publishes the crate
-  to crates.io and then creates the tag and the GitHub release with the
-  binaries on that commit. Both publishing steps skip what already exists,
-  so a failed release run is finished by re-running it. It needs the secret
-  `CARGO_REGISTRY_TOKEN` (a crates.io API token with the `publish-update` and,
-  for the first release, `publish-new` scope, whose crate scope includes
-  `mailctl`).
+- After all checks pass on `main`, CI publishes the crate to crates.io and
+  then creates the tag and the GitHub release on that commit. Both publishing
+  steps skip what already exists, so a failed release run is finished by
+  re-running it. It needs the secret `CARGO_REGISTRY_TOKEN` (a crates.io API
+  token with the `publish-update` and, for the first release, `publish-new`
+  scope, whose crate scope includes `mailctl`).
 - Pull requests from forks fail the version job: their version cannot be
   committed. A maintainer brings such a change in through a branch of this
   repository.

@@ -12,7 +12,7 @@ keywords = ["imap", "email", "cli", "agent", "mailbox"]
 categories = ["command-line-utilities", "email"]
 
 [features]
-## Compile OpenSSL into the binary (used for the static Linux release build).
+## Compile OpenSSL into the binary, for hosts without the OpenSSL headers.
 vendored-openssl = ["native-tls/vendored"]
 
 [[bin]]
