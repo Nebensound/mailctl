@@ -293,22 +293,33 @@ live in `src/tests/` and the fakes in `src/testing.rs`; both are test code and
 are not counted.
 
 All decisions live in tested modules, including those the adapters need:
-`imap_wire` (flags, UID sets, keyword support, APPEND quoting), `probe` (the
-SMTP dialog before STARTTLS, handshake classification),
+`imap_wire` (reading LIST, FETCH, SEARCH, CAPABILITY and SELECT responses,
+command completion, flag lists, UID sets, keyword support, mailbox quoting),
+`probe` (the SMTP dialog before STARTTLS, handshake classification),
 `config::keychain_store_command` and `Secret::from_keychain_output`. The file
 handling of the system backend is tested against a temporary directory.
 
-What remains are thin I/O wrappers that need a live IMAP or SMTP server, the
-real network, a terminal or the macOS `security` tool. Each is marked
+The IMAP and SMTP adapters are covered by the end-to-end tests (see
+Development), failure paths included: the scripted IMAP server refuses,
+closes or stalls any command on request, and a test checks for every
+command of each operation that a refusal or a closed connection there fails
+the command line and loses no mail.
+
+Error paths that are handled the same way are written as one `and_then`
+chain, not as a row of `?`, so that one tested failure covers all of them.
+Failures only the operating system can cause, such as a runtime that cannot
+start, are not simulated one by one. Rewriting such a chain with `?` leaves
+uncovered regions behind.
+
+What remains are thin wrappers that need the real network (server
+discovery), a terminal or the macOS `security` tool. Each is marked
 `#[cfg_attr(coverage_nightly, coverage(off))]` directly, with a
 `// Coverage:` comment giving the reason, and `main` is exercised by the
 release smoke test.
 
-- **Risk:** mistakes in those wrappers (for example calling the wrong IMAP
-  command) are not caught by unit tests.
-- **Next step:** integration tests against a disposable IMAP/SMTP server (for
-  example GreenMail or Dovecot in a container) in CI, then remove the marks
-  from the IMAP and SMTP adapters.
+- **Risk:** a provider that behaves unlike the scripted profiles. Changes to
+  the adapters get a live check against a real account before they are
+  merged (see `CONTRIBUTING.md`).
 
 ## Versioning
 

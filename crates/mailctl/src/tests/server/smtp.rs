@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 use std::io::{BufRead as _, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -37,6 +38,7 @@ pub(crate) type Filing = Option<(ImapServer, String)>;
 pub(crate) struct SmtpServer {
     pub(crate) port: u16,
     accepted: Arc<Mutex<Vec<Accepted>>>,
+    refuse_noop: Arc<AtomicBool>,
 }
 
 impl SmtpServer {
@@ -47,18 +49,30 @@ impl SmtpServer {
         let shared = Arc::clone(&accepted);
         let config = Arc::clone(&ca.config);
         let filing = Arc::new(filing);
+        let refuse_noop = Arc::new(AtomicBool::new(false));
+        let refuse = Arc::clone(&refuse_noop);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 limit_silence(&stream);
                 let context = Context {
                     accepted: Arc::clone(&shared),
                     filing: Arc::clone(&filing),
+                    refuse_noop: Arc::clone(&refuse),
                 };
                 let config = Arc::clone(&config);
                 std::thread::spawn(move || serve(stream, config, mode, &context));
             }
         });
-        Ok(Self { port, accepted })
+        Ok(Self {
+            port,
+            accepted,
+            refuse_noop,
+        })
+    }
+
+    /// Answers `NOOP` with an error, which fails a connection test.
+    pub(crate) fn refuse_noop(&self) {
+        self.refuse_noop.store(true, Ordering::Relaxed);
     }
 
     /// The messages accepted so far.
@@ -73,6 +87,7 @@ impl SmtpServer {
 struct Context {
     accepted: Arc<Mutex<Vec<Accepted>>>,
     filing: Arc<Filing>,
+    refuse_noop: Arc<AtomicBool>,
 }
 
 impl Context {
@@ -229,6 +244,9 @@ fn dialog<S: Read + Write>(
                 from.clear();
                 to.clear();
                 reply(reader, "250 2.0.0 Ok")?;
+            }
+            "NOOP" if context.refuse_noop.load(Ordering::Relaxed) => {
+                reply(reader, "554 5.0.0 scripted failure")?;
             }
             "NOOP" => reply(reader, "250 2.0.0 Ok")?,
             "QUIT" => {
