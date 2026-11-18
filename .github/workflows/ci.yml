@@ -1,7 +1,7 @@
 # Self-contained CI: every check of this repository can be reproduced locally.
 # Every merge into main is released: the version job derives the version from
-# the commit messages, and the publish job ships it to crates.io and as a
-# GitHub release with binaries. See "Releasing" in the README.
+# the commit messages, and the publish job ships it to crates.io and creates
+# the GitHub release. See "Releasing" in the README.
 name: CI
 
 on:
@@ -315,7 +315,8 @@ jobs:
           else
             cargo publish -p mailctl --locked
           fi
-      # The tag is created here, on the exact commit that was published, and only after crates.io accepted the version.
+      # The tag is created here, on the exact commit that was published, and
+      # only after crates.io accepted the version.
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
