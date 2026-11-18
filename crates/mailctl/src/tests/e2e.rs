@@ -845,13 +845,42 @@ fn an_unreadable_certificate_authority_is_refused() -> Result<(), String> {
 #[test]
 fn a_flag_change_sent_along_with_a_fetch_is_not_taken_for_a_mail() -> Result<(), String> {
     let e2e = dovecot_mail()?;
-    e2e.server.send_unsolicited_fetch()?;
+    e2e.server
+        .send_unsolicited_fetch(r"* 1 FETCH (FLAGS (\Seen))")?;
     let (list, code) = e2e.run(&["list", "-a", "mail"])?;
     assert_eq!(code, 0, "{list}");
     assert_eq!(list.as_array().map(Vec::len), Some(2), "{list}");
     let (shown, code) = e2e.run(&["show", "-a", "mail", "--uid", "2"])?;
     assert_eq!(code, 0, "{shown}");
     assert_eq!(at(&shown, "/subject"), "News");
+    Ok(())
+}
+
+#[test]
+fn a_flag_change_with_a_uid_sent_along_is_not_taken_for_a_mail() -> Result<(), String> {
+    // Servers send the UID along once QRESYNC is on, some after any UID
+    // command. The change comes first, so a reader that takes the first
+    // FETCH of a UID gets a mail without header or body.
+    let e2e = dovecot_mail()?;
+    e2e.server
+        .send_unsolicited_fetch(r"* 1 FETCH (UID 1 FLAGS (\Seen))")?;
+    let (list, code) = e2e.run(&["list", "-a", "mail"])?;
+    assert_eq!(code, 0, "{list}");
+    assert_eq!(list.as_array().map(Vec::len), Some(2), "{list}");
+    let (shown, code) = e2e.run(&["show", "-a", "mail", "--uid", "1"])?;
+    assert_eq!(code, 0, "{shown}");
+    assert_eq!(at(&shown, "/message_id"), "a@example.com");
+
+    // A move is confirmed by fetching the header of the moved mail alone;
+    // a change to another mail sent along is not one of the requested UIDs.
+    e2e.server
+        .send_unsolicited_fetch(r"* 2 FETCH (UID 2 FLAGS (\Seen))")?;
+    let mut args = vec!["move"];
+    args.extend(UID_1);
+    args.extend(["--to", "INBOX.Archive"]);
+    let (moved, code) = e2e.run(&args)?;
+    assert_eq!(code, 0, "{moved}");
+    assert_eq!(e2e.ids("INBOX.Archive")?, ["<a@example.com>"]);
     Ok(())
 }
 

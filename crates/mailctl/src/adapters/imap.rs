@@ -283,17 +283,21 @@ impl MailStore for ImapStore {
             uid_set(uids)
         );
         driver.run(command(session, &text, |r| fetches.extend(fetched(r))))?;
-        // A FETCH without a UID is a flag change another client made, sent
-        // along unasked; it is not one of the requested mails.
+        // A flag change another client made can be sent along unasked, with
+        // or without a UID; only a requested UID with a header is a mail.
         Ok(fetches
             .into_iter()
             .filter_map(|f| {
-                let uid = f.uid.and_then(|uid| Uid::new(uid).ok())?;
+                let uid = f
+                    .uid
+                    .and_then(|uid| Uid::new(uid).ok())
+                    .filter(|uid| uids.contains(uid))?;
+                let header = f.header?;
                 Some(RawHeader {
                     uid,
                     flags: f.flags,
                     size: f.size.unwrap_or(0),
-                    header: f.header.unwrap_or_default(),
+                    header,
                 })
             })
             .collect())
@@ -306,18 +310,19 @@ impl MailStore for ImapStore {
         let mut fetches = Vec::new();
         let text = format!("UID FETCH {uid} (UID FLAGS RFC822.SIZE BODY.PEEK[])");
         driver.run(command(session, &text, |r| fetches.extend(fetched(r))))?;
+        // As in `headers`: a flag change sent along carries no body.
         Ok(fetches
             .into_iter()
-            .find(|f| f.uid == Some(uid.get()))
-            .map(|f| {
-                let body = f.body.unwrap_or_default();
+            .filter(|f| f.uid == Some(uid.get()))
+            .find_map(|f| {
+                let body = f.body?;
                 let length = u32::try_from(body.len()).unwrap_or(u32::MAX);
-                RawMessage {
+                Some(RawMessage {
                     uid,
                     flags: f.flags,
                     size: f.size.unwrap_or(length),
                     body,
-                }
+                })
             }))
     }
 

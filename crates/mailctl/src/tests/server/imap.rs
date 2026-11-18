@@ -147,7 +147,7 @@ struct State {
     delete_meanwhile: Option<(usize, String, u32)>,
     /// Send a flag change without UID along with every `UID FETCH`, as a
     /// server does when another client changed a flag meanwhile.
-    unsolicited_fetch: bool,
+    unsolicited_fetch: Option<String>,
 }
 
 fn lock(state: &Mutex<State>) -> Result<MutexGuard<'_, State>, String> {
@@ -186,7 +186,7 @@ impl ImapServer {
             fault: None,
             close_before_greeting: false,
             delete_meanwhile: None,
-            unsolicited_fetch: false,
+            unsolicited_fetch: None,
         }));
         let shared = Arc::clone(&state);
         let config = Arc::clone(&ca.config);
@@ -271,8 +271,8 @@ impl ImapServer {
     }
 
     /// Sends a flag change without UID along with every `UID FETCH`.
-    pub(crate) fn send_unsolicited_fetch(&self) -> Result<(), String> {
-        lock(&self.state)?.unsolicited_fetch = true;
+    pub(crate) fn send_unsolicited_fetch(&self, line: &str) -> Result<(), String> {
+        lock(&self.state)?.unsolicited_fetch = Some(line.to_owned());
         Ok(())
     }
 
@@ -757,11 +757,11 @@ impl Session<'_> {
             return Ok(Reply::bad("unsupported fetch item"));
         }
         let read_only = self.read_only;
-        let unsolicited = lock(self.state)?.unsolicited_fetch;
+        let unsolicited = lock(self.state)?.unsolicited_fetch.clone();
         let lines = self.with_folder(|folder| {
             let mut lines = Vec::new();
-            if unsolicited && !folder.messages.is_empty() {
-                lines.push(br"* 1 FETCH (FLAGS (\Seen))".to_vec());
+            if let Some(line) = unsolicited.filter(|_| !folder.messages.is_empty()) {
+                lines.push(line.into_bytes());
             }
             for (index, message) in folder.messages.iter_mut().enumerate() {
                 if !in_set(message.uid, set) {
