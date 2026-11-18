@@ -2,12 +2,14 @@
 
 use lettre::address::Envelope;
 use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::client::{Certificate, CertificateStore, Tls, TlsParameters};
 use lettre::{SmtpTransport, Transport};
 
+use crate::adapters::net::Trust;
 use crate::config::{AccountConfig, Secret};
 use crate::error::Error;
 use crate::store::MailSender;
-use crate::types::EmailAddress;
+use crate::types::{EmailAddress, Security};
 
 /// An SMTP transport for one account.
 pub struct SmtpSender {
@@ -28,14 +30,34 @@ impl SmtpSender {
     /// # Errors
     /// Invalid host configuration.
     pub fn new(account: &AccountConfig, secret: &Secret) -> Result<Self, Error> {
-        let builder = if account.smtp_tls() == crate::types::Security::Tls {
-            SmtpTransport::relay(&account.smtp_host)
-        } else {
-            SmtpTransport::starttls_relay(&account.smtp_host)
+        Self::new_with(account, secret, &Trust::System)
+    }
+
+    /// Prepares the transport, trusting the certificates `trust` names.
+    ///
+    /// # Errors
+    /// Invalid host configuration or certificate.
+    pub(crate) fn new_with(
+        account: &AccountConfig,
+        secret: &Secret,
+        trust: &Trust,
+    ) -> Result<Self, Error> {
+        let mut parameters = TlsParameters::builder(account.smtp_host.clone());
+        if let Trust::Only(pem) = trust {
+            parameters = parameters
+                .certificate_store(CertificateStore::None)
+                .add_root_certificate(Certificate::from_pem(pem).map_err(send_err)?);
         }
-        .map_err(send_err)?;
-        let transport = builder
+        let parameters = parameters.build().map_err(send_err)?;
+        let tls = match account.smtp_tls() {
+            Security::Tls => Tls::Wrapper(parameters),
+            Security::StartTls => Tls::Required(parameters),
+        };
+        // `builder_dangerous` only means "no TLS unless set"; it is always
+        // set here, as `relay` and `starttls_relay` would.
+        let transport = SmtpTransport::builder_dangerous(&account.smtp_host)
             .port(account.smtp_port)
+            .tls(tls)
             .credentials(Credentials::new(
                 account.smtp_login().to_owned(),
                 secret.expose().to_owned(),

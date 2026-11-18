@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
-use super::TestCa;
+use super::{TestCa, limit_silence};
 
 /// The login the server accepts.
 pub(crate) const USER: &str = "alice@example.com";
@@ -125,6 +125,8 @@ struct State {
     folders: BTreeMap<String, Folder>,
     /// Every command received, as its name (`LOGIN`, `UID MOVE`, …).
     commands: Vec<String>,
+    /// `LOGIN` takes any password for [`USER`].
+    any_password: bool,
 }
 
 fn lock(state: &Mutex<State>) -> Result<MutexGuard<'_, State>, String> {
@@ -132,17 +134,19 @@ fn lock(state: &Mutex<State>) -> Result<MutexGuard<'_, State>, String> {
 }
 
 /// A running server; its threads end with the test process.
+#[derive(Clone)]
 pub(crate) struct ImapServer {
     pub(crate) port: u16,
-    /// The certificate authority to trust.
-    pub(crate) ca_pem: Vec<u8>,
     state: Arc<Mutex<State>>,
 }
 
 impl ImapServer {
     /// Starts a server with these folders (wire name, `LIST` attributes).
-    pub(crate) fn start(profile: Profile, folders: &[(&str, &str)]) -> Result<Self, String> {
-        let ca = TestCa::new()?;
+    pub(crate) fn start(
+        ca: &TestCa,
+        profile: Profile,
+        folders: &[(&str, &str)],
+    ) -> Result<Self, String> {
         let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let state = Arc::new(Mutex::new(State {
@@ -157,31 +161,43 @@ impl ImapServer {
                 })
                 .collect(),
             commands: Vec::new(),
+            any_password: false,
         }));
         let shared = Arc::clone(&state);
         let config = Arc::clone(&ca.config);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
+                limit_silence(&stream);
                 let (config, state) = (Arc::clone(&config), Arc::clone(&shared));
                 std::thread::spawn(move || serve(stream, config, profile, &state));
             }
         });
-        Ok(Self {
-            port,
-            ca_pem: ca.pem,
-            state,
-        })
+        Ok(Self { port, state })
     }
 
     /// Stores a mail (lines joined with CRLF) and returns its UID.
     pub(crate) fn add(&self, folder: &str, lines: &[&str], flags: &[&str]) -> Result<u32, String> {
+        let body = format!("{}\r\n", lines.join("\r\n")).into_bytes();
+        self.put(
+            folder,
+            body,
+            flags.iter().map(|f| (*f).to_owned()).collect(),
+        )
+    }
+
+    /// Stores a mail as it is and returns its UID.
+    pub(crate) fn put(
+        &self,
+        folder: &str,
+        body: Vec<u8>,
+        flags: BTreeSet<String>,
+    ) -> Result<u32, String> {
         let mut state = lock(&self.state)?;
         let folder = state
             .folders
             .get_mut(folder)
             .ok_or_else(|| format!("no folder {folder}"))?;
-        let body = format!("{}\r\n", lines.join("\r\n")).into_bytes();
-        Ok(folder.add(body, flags.iter().map(|f| (*f).to_owned()).collect()))
+        Ok(folder.add(body, flags))
     }
 
     /// The mails of a folder.
@@ -196,6 +212,12 @@ impl ImapServer {
     /// The folder names on the wire.
     pub(crate) fn folders(&self) -> Result<Vec<String>, String> {
         Ok(lock(&self.state)?.folders.keys().cloned().collect())
+    }
+
+    /// Lets `LOGIN` take any password, so that a test can fail SMTP alone.
+    pub(crate) fn accept_any_password(&self) -> Result<(), String> {
+        lock(&self.state)?.any_password = true;
+        Ok(())
     }
 
     /// The commands received so far.
@@ -467,7 +489,9 @@ impl Session<'_> {
             } else {
                 "* CAPABILITY IMAP4rev1 AUTH=PLAIN".to_owned()
             }),
-            "LOGIN" if text(0) == USER && text(1) == PASSWORD => {
+            "LOGIN"
+                if text(0) == USER && (text(1) == PASSWORD || lock(self.state)?.any_password) =>
+            {
                 self.logged_in = true;
                 Reply::ok("Logged in")
             }

@@ -3,8 +3,11 @@
 //! the responses of real providers (see [`imap::Profile`]).
 
 pub(crate) mod imap;
+pub(crate) mod smtp;
 
+use std::net::TcpStream;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
@@ -63,4 +66,11 @@ impl TestCa {
             config: Arc::new(config),
         })
     }
+}
+
+/// Ends a connection whose client stays silent, so that a test whose
+/// client and server misunderstand each other fails at once instead of
+/// waiting for the client's own timeout.
+pub(crate) fn limit_silence(stream: &TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
 }

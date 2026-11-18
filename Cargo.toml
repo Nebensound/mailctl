@@ -29,6 +29,7 @@ sha2 = "0.11"
 thiserror = "2"
 toml = "1.2.1"
 # Test-only: the scripted mail servers of the end-to-end tests.
+base64 = "0.23.1"
 rcgen = "0.14.10"
 rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12"] }
 time = "0.3.47"
