@@ -39,3 +39,11 @@ pub mod utf7;
 
 #[cfg(test)]
 mod testing;
+
+#[cfg(test)]
+#[path = "tests/server/mod.rs"]
+mod test_server;
+
+#[cfg(test)]
+#[path = "tests/e2e.rs"]
+mod e2e;

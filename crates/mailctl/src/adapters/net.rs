@@ -13,6 +13,17 @@ use crate::probe::{handshake_failure, starttls_dialog};
 /// Timeout for every network step.
 const TIMEOUT: Duration = Duration::from_secs(8);
 
+/// The certificates the IMAP and SMTP adapters trust.
+#[derive(Debug)]
+pub(crate) enum Trust {
+    /// The operating system's root certificates, as in production.
+    System,
+    /// Only this certificate authority (PEM), for tests against a local
+    /// server.
+    #[cfg_attr(not(test), expect(dead_code, reason = "only tests use their own CA"))]
+    Only(Vec<u8>),
+}
+
 /// Connects to the first address of `host` that accepts a connection within
 /// `timeout` each. Trying all of them matters where the resolver returns an
 /// IPv6 address first on a network without IPv6.

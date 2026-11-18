@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio_native_tls::TlsStream;
 
-use crate::adapters::net::connect_any;
+use crate::adapters::net::{Trust, connect_any};
 use crate::config::{AccountConfig, Secret};
 use crate::error::Error;
 use crate::imap_wire::{SelectReader, flag_list, flag_name, quoted_mailbox, special_use, uid_set};
@@ -82,6 +82,24 @@ impl ImapStore {
     /// # Errors
     /// Connection, TLS or login errors.
     pub fn connect(account: &AccountConfig, secret: &Secret) -> Result<Self, Error> {
+        Self::connect_with(account, secret, &Trust::System)
+    }
+
+    /// Connects and logs in, trusting the certificates `trust` names.
+    ///
+    /// # Errors
+    /// Connection, TLS or login errors.
+    pub(crate) fn connect_with(
+        account: &AccountConfig,
+        secret: &Secret,
+        trust: &Trust,
+    ) -> Result<Self, Error> {
+        let mut tls = native_tls::TlsConnector::builder();
+        if let Trust::Only(pem) = trust {
+            tls.disable_built_in_roots(true)
+                .add_root_certificate(native_tls::Certificate::from_pem(pem).map_err(store_err)?);
+        }
+        let tls = tokio_native_tls::TlsConnector::from(tls.build().map_err(store_err)?);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
@@ -92,9 +110,6 @@ impl ImapStore {
         let tcp = connect_any(&account.imap_host, account.imap_port, CONNECT_TIMEOUT)
             .map_err(store_err)?;
         tcp.set_nonblocking(true).map_err(store_err)?;
-        let tls = tokio_native_tls::TlsConnector::from(
-            native_tls::TlsConnector::new().map_err(store_err)?,
-        );
         let mut driver = Driver {
             runtime,
             broken: false,
