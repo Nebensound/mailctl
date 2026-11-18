@@ -303,7 +303,13 @@ The IMAP and SMTP adapters are covered by the end-to-end tests (see
 Development), failure paths included: the scripted IMAP server refuses,
 closes or stalls any command on request, and a test checks for every
 command of each operation that a refusal or a closed connection there fails
-the command line.
+the command line and loses no mail.
+
+Error paths that are handled the same way are written as one `and_then`
+chain, not as a row of `?`, so that one tested failure covers all of them.
+Failures only the operating system can cause, such as a runtime that cannot
+start, are not simulated one by one. Rewriting such a chain with `?` leaves
+uncovered regions behind.
 
 What remains are thin wrappers that need the real network (server
 discovery), a terminal or the macOS `security` tool. Each is marked

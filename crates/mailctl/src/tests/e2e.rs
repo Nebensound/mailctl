@@ -776,6 +776,26 @@ fn every_failed_imap_command_fails_the_command_line() -> Result<(), String> {
                     "{:?} with {fault:?} at {command} ({index}): {out}",
                     scenario.args
                 );
+                // Whatever failed, the mail is still there, not marked
+                // deleted: in its folder or in the target.
+                let mut kept = 0_usize;
+                for folder in e2e.server.folders()? {
+                    kept = kept.saturating_add(
+                        e2e.server
+                            .messages(&folder)?
+                            .iter()
+                            .filter(|m| {
+                                m.header("Message-ID").as_deref() == Some("<a@example.com>")
+                                    && !m.flags.contains(r"\Deleted")
+                            })
+                            .count(),
+                    );
+                }
+                assert!(
+                    kept >= 1,
+                    "{:?} with {fault:?} at {command} ({index}) lost the mail",
+                    scenario.args
+                );
             }
         }
     }
