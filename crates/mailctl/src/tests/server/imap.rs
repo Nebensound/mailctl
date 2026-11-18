@@ -145,8 +145,9 @@ struct State {
     /// Before the command with this index, mark this mail deleted, as
     /// another client would meanwhile: folder and UID.
     delete_meanwhile: Option<(usize, String, u32)>,
-    /// Send a flag change without UID along with every `UID FETCH`, as a
-    /// server does when another client changed a flag meanwhile.
+    /// An untagged FETCH line (a flag change, with or without UID) to send
+    /// along with every `UID FETCH`, as a server does when another client
+    /// changed a flag meanwhile.
     unsolicited_fetch: Option<String>,
 }
 
@@ -270,7 +271,8 @@ impl ImapServer {
         Ok(())
     }
 
-    /// Sends a flag change without UID along with every `UID FETCH`.
+    /// Sends `line`, an untagged FETCH such as a flag change with or without
+    /// UID, along with every `UID FETCH`.
     pub(crate) fn send_unsolicited_fetch(&self, line: &str) -> Result<(), String> {
         lock(&self.state)?.unsolicited_fetch = Some(line.to_owned());
         Ok(())
